@@ -352,6 +352,8 @@ func VerifySlip(url string, data VerifySlipParams) (*VerifySlipResponse, error) 
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "PostmanRuntime/7.42.0")
+	// req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 
 	client := &http.Client{
 		Transport: &http.Transport{
