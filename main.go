@@ -361,7 +361,7 @@ func VerifySlip(url string, data VerifySlipParams) (*VerifySlipResponse, error) 
 			},
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
+			return nil // Follow redirect
 		},
 	}
 
