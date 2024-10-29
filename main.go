@@ -3,13 +3,17 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
+	pp "github.com/Frontware/promptpay"
 	"github.com/bwmarrin/discordgo"
-	promptpayqr "github.com/kazekim/promptpay-qr-go"
 	"github.com/spf13/viper"
+	"github.com/yeqown/go-qrcode/v2"
+	"github.com/yeqown/go-qrcode/writer/standard"
 )
 
 var (
@@ -23,6 +27,7 @@ func MessageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	nameUserMap := viper.GetStringMapString("UsernameMapping")
+
 	if strings.Contains(m.Message.Content, "!genQR") {
 		tempMsg := m.Message.Content
 		tempArr := strings.Split(tempMsg, "\n")
@@ -36,24 +41,75 @@ func MessageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 			}
 
 			if !strings.Contains(msg, "!genQR") {
+				fmt.Println(msg)
+
+				var amountFloat64 float64
 				data := strings.Split(msg, " ")
 
-				// Gen QR
-				qr, err := promptpayqr.QRForTargetWithAmount(targetQR, data[1])
+				if s, err := strconv.ParseFloat(data[1], 64); err == nil {
+					amountFloat64 = s
+				}
+
+				payment := pp.PromptPay{
+					PromptPayID: targetQR,      // Tax-ID/ID Card/E-Wallet
+					Amount:      amountFloat64, // Positive amount
+				}
+
+				qrcodeStr, err := payment.Gen() // Generate string to be use in QRCode
 				if err != nil {
 					log.Fatal(err)
+				}
+
+				fmt.Println(qrcodeStr)
+
+				qrc, err := qrcode.New(qrcodeStr)
+				if err != nil {
+					fmt.Printf("could not generate QRCode: %v", err)
+					return
+				}
+
+				filename := data[0] + ".jpg"
+
+				w, err := standard.New(filename)
+				if err != nil {
+					fmt.Printf("standard.New failed: %v", err)
+					return
+				}
+
+				// save file
+				if err = qrc.Save(w); err != nil {
+					fmt.Printf("could not save image: %v", err)
+				}
+
+				// Open the file
+				file, err := os.Open(filename)
+				if err != nil {
+					panic(err)
+				}
+				defer file.Close()
+
+				// Read the entire file into a byte slice
+				fileData, err := io.ReadAll(file)
+				if err != nil {
+					panic(err)
+				}
+
+				// Create a new bytes.Buffer and write the data to it
+				var buffer bytes.Buffer
+				_, err = buffer.Write(fileData)
+				if err != nil {
+					panic(err)
 				}
 
 				_, err = s.ChannelFileSendWithMessage(
 					m.ChannelID,
 					fmt.Sprintf("<@%s> %s บาท", nameUserMap[data[0]], data[1]),
-					data[0]+"temp.png",
-					bytes.NewBuffer(*qr),
+					data[0]+".png",
+					bytes.NewBuffer(buffer.Bytes()),
 				)
 				if err != nil {
 					log.Fatal(err)
 				}
-
 			}
 		}
 	}
