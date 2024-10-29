@@ -1,3 +1,6 @@
+run:
+	go run ./
+
 build-docker:
 	docker build -t image-registry.fintblock.com/billing-bot .
 

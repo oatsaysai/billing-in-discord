@@ -7,6 +7,7 @@ toolchain go1.23.2
 require (
 	github.com/Frontware/promptpay v0.0.0-20201011053948-0c839c6b4342
 	github.com/bwmarrin/discordgo v0.28.1
+	github.com/makiuchi-d/gozxing v0.1.1
 	github.com/spf13/viper v1.19.0
 	github.com/yeqown/go-qrcode/v2 v2.2.2
 	github.com/yeqown/go-qrcode/writer/standard v1.2.4
@@ -37,6 +38,7 @@ require (
 	golang.org/x/image v0.10.0 // indirect
 	golang.org/x/sys v0.18.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
