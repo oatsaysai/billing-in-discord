@@ -365,6 +365,8 @@ func VerifySlip(url string, data VerifySlipParams) (*VerifySlipResponse, error) 
 	}
 	defer resp.Body.Close()
 
+	fmt.Printf("res body: %s", body)
+
 	var res VerifySlipResponse
 	if err := json.Unmarshal(body, &res); err != nil {
 		return nil, err
