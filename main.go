@@ -527,7 +527,7 @@ func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	} else if strings.Contains(m.Message.Content, "!calBill") {
 		callBill(s, m)
 	} else {
-		verifyQR(s, m)
+		// verifyQR(s, m)
 	}
 }
 
