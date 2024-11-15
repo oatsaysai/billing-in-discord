@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -125,6 +126,132 @@ func genQR(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func callBill(s *discordgo.Session, m *discordgo.MessageCreate) {
+
+	tempMsg := m.Message.Content
+	tempArr := strings.Split(tempMsg, "\n")
+
+	targetQR := ""
+	balances := make(map[string]float64)
+
+	// สร้าง regular expression สำหรับจับเฉพาะ user ID
+	re := regexp.MustCompile(`<@(\d+)>`)
+
+	for _, msg := range tempArr {
+		if strings.Contains(msg, "!calBill") {
+			data := strings.Split(msg, " ")
+			targetQR = data[1]
+		} else {
+			// หา matches ทั้งหมดในข้อความ
+			matches := re.FindAllStringSubmatch(msg, -1)
+
+			// เก็บ user ID เป็น slice ของ string
+			var userIds []string
+			for _, match := range matches {
+				if len(match) > 1 {
+					userIds = append(userIds, match[1])
+				}
+			}
+
+			// // แสดงผล user ID ทั้งหมดที่พบ
+			// for _, userId := range userIds {
+			// 	fmt.Println("Found user ID:", userId)
+			// }
+
+			parts := strings.Fields(msg)
+			price, _ := strconv.ParseFloat(parts[1], 64)
+
+			// คำนวณยอดเงินต่อคน
+			amountPerPerson := price / float64(len(userIds))
+
+			// บันทึกยอดเงินลงใน map
+			for _, person := range userIds {
+				balances[person] += amountPerPerson
+			}
+		}
+	}
+
+	for person, balance := range balances {
+		fmt.Printf("%s: %.2f\n", person, balance)
+
+		payment := pp.PromptPay{
+			PromptPayID: targetQR, // Tax-ID/ID Card/E-Wallet
+			Amount:      balance,  // Positive amount
+		}
+
+		qrcodeStr, err := payment.Gen() // Generate string to be use in QRCode
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Println(qrcodeStr)
+
+		qrc, err := qrcode.New(qrcodeStr)
+		if err != nil {
+			fmt.Printf("could not generate QRCode: %v", err)
+			return
+		}
+
+		filename := person + ".jpg"
+
+		w, err := standard.New(filename)
+		if err != nil {
+			fmt.Printf("standard.New failed: %v", err)
+			return
+		}
+
+		// save file
+		if err = qrc.Save(w); err != nil {
+			fmt.Printf("could not save image: %v", err)
+		}
+
+		// Open the file
+		file, err := os.Open(filename)
+		if err != nil {
+			panic(err)
+		}
+		defer file.Close()
+		defer os.Remove(filename)
+
+		// Read the entire file into a byte slice
+		fileData, err := io.ReadAll(file)
+		if err != nil {
+			panic(err)
+		}
+
+		// Create a new bytes.Buffer and write the data to it
+		var buffer bytes.Buffer
+		_, err = buffer.Write(fileData)
+		if err != nil {
+			panic(err)
+		}
+
+		_, err = s.ChannelFileSendWithMessage(
+			m.ChannelID,
+			fmt.Sprintf("<@%s> %.2f บาท", person, balance),
+			filename,
+			bytes.NewBuffer(buffer.Bytes()),
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Save data to Ram
+		tmpPerson, ok := waitToVerify[person]
+		if ok {
+			tmpPerson.Amounts = append(tmpPerson.Amounts, balance)
+			waitToVerify[person] = tmpPerson
+		} else {
+			waitToVerify[person] = Person{
+				Name:    person,
+				Amounts: []float64{balance},
+			}
+		}
+
+		fmt.Println(waitToVerify[person])
+	}
+}
+
+func callBillTmp(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	nameUserMap := viper.GetStringMapString("UsernameMapping")
 
