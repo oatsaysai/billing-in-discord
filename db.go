@@ -14,27 +14,32 @@ import (
 var dbPool *pgxpool.Pool
 
 func initPostgresPool() {
-	config, err := pgxpool.ParseConfig(fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s",
+
+	connStr := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable search_path=%s",
+		viper.GetString("PostgreSQL.Host"),
+		viper.GetString("PostgreSQL.Port"),
 		viper.GetString("PostgreSQL.User"),
 		viper.GetString("PostgreSQL.Password"),
-		viper.GetString("PostgreSQL.Host"),
-		viper.GetInt("PostgreSQL.Port"),
 		viper.GetString("PostgreSQL.DBName"),
-	))
+		viper.GetString("PostgreSQL.Schema"),
+	)
+
+	var connectConf, err = pgxpool.ParseConfig(connStr)
 	if err != nil {
 		log.Fatalf("Unable to parse PostgreSQL config: %v", err)
 	}
 
-	config.MaxConns = int32(viper.GetInt("PostgreSQL.PoolMaxConns"))
-	config.ConnConfig.ConnectTimeout = 5 * time.Second
+	connectConf.MaxConns = int32(viper.GetInt("PostgreSQL.PoolMaxConns"))
+	connectConf.HealthCheckPeriod = 15 * time.Second
+	connectConf.ConnConfig.ConnectTimeout = 5 * time.Second
 
 	// Set timezone to PGX runtime
 	if s := os.Getenv("TZ"); s != "" {
-		config.ConnConfig.RuntimeParams["timezone"] = s
+		connectConf.ConnConfig.RuntimeParams["timezone"] = s
 	}
 
-	dbPool, err = pgxpool.NewWithConfig(context.Background(), config)
+	dbPool, err = pgxpool.NewWithConfig(context.Background(), connectConf)
 	if err != nil {
 		log.Fatalf("Unable to create PostgreSQL connection pool: %v", err)
 	}

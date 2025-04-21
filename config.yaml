@@ -7,4 +7,5 @@ PostgreSQL:
   User: "postgres"
   Password: "postgres"
   DBName: "billing-db"
+  Schema: "public"
   PoolMaxConns: 10
