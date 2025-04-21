@@ -7,7 +7,7 @@ WORKDIR /app
 ADD go.mod go.sum /app/
 RUN go mod download
 
-COPY main.go /app
+COPY *.go /app
 RUN go build -o /build/app
 
 # run stage
