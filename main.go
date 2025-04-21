@@ -457,7 +457,7 @@ func showTxByPayerID(s *discordgo.Session, m *discordgo.MessageCreate) {
 		if alreadyPaid {
 			paidStatus = "Paid"
 		}
-		response.WriteString(fmt.Sprintf("- TxID: %d | %.2f บาท for %s to <@%s> on %s | Status: %s\n", txID, amount, description, payeeDiscordID, createdAt.Local().Format("2006-01-02 15:04:05"), paidStatus))
+		response.WriteString(fmt.Sprintf("- TxID: %d | %.2f บาท for %s to <@%s> on %s | Status: %s\n", txID, amount, description, payeeDiscordID, createdAt.Format(time.RFC3339), paidStatus))
 	}
 
 	if response.Len() == 0 {
@@ -521,7 +521,7 @@ func showTxByPayeeID(s *discordgo.Session, m *discordgo.MessageCreate) {
 		if alreadyPaid {
 			paidStatus = "Paid"
 		}
-		response.WriteString(fmt.Sprintf("- TxID: %d | %.2f บาท for %s from <@%s> on %s | Status: %s\n", txID, amount, description, payeeDiscordID, createdAt.Local().Format("2006-01-02 15:04:05"), paidStatus))
+		response.WriteString(fmt.Sprintf("- TxID: %d | %.2f บาท for %s from <@%s> on %s | Status: %s\n", txID, amount, description, payeeDiscordID, createdAt.Format(time.RFC3339), paidStatus))
 	}
 
 	if response.Len() == 0 {
