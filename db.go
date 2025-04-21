@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,6 +28,11 @@ func initPostgresPool() {
 
 	config.MaxConns = int32(viper.GetInt("PostgreSQL.PoolMaxConns"))
 	config.ConnConfig.ConnectTimeout = 5 * time.Second
+
+	// Set timezone to PGX runtime
+	if s := os.Getenv("TZ"); s != "" {
+		config.ConnConfig.RuntimeParams["timezone"] = s
+	}
 
 	dbPool, err = pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {

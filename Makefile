@@ -15,6 +15,7 @@ build-docker:
 run-docker:
 	docker run \
 		-d \
+		-e TZ=Asia/Bangkok \
 		--name billing-bot \
 		-v $(PWD)/config.yaml:/config.yaml \
 		image-registry.fintblock.com/billing-bot
