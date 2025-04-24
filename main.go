@@ -627,10 +627,13 @@ func listUserDebtsByDebtorID(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Query all debts for the debtor
 	rows, err := dbPool.Query(
 		context.Background(),
-		`SELECT ud.amount, u.discord_id AS creditor_discord_id
-         FROM user_debts ud
-         JOIN users u ON ud.creditor_id = u.id
-         WHERE ud.debtor_id = $1`,
+		`
+		SELECT ud.amount, u.discord_id AS creditor_discord_id
+        FROM user_debts ud
+        JOIN users u ON ud.creditor_id = u.id
+    	WHERE ud.debtor_id = $1
+		AND ud.amount <> 0
+		`,
 		debtorID,
 	)
 	if err != nil {
@@ -678,10 +681,13 @@ func listUserDebtsByCreditorID(creditorDiscordID string) (string, error) {
 	// Query all debts for the creditor
 	rows, err := dbPool.Query(
 		context.Background(),
-		`SELECT ud.amount, u.discord_id AS debtor_discord_id
-         FROM user_debts ud
-         JOIN users u ON ud.debtor_id = u.id
-         WHERE ud.creditor_id = $1`,
+		`
+		SELECT ud.amount, u.discord_id AS debtor_discord_id
+        FROM user_debts ud
+    	JOIN users u ON ud.debtor_id = u.id
+    	WHERE ud.creditor_id = $1
+		AND ud.amount <> 0,
+		`,
 		creditorID,
 	)
 	if err != nil {
