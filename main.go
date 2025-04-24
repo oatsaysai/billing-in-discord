@@ -686,7 +686,7 @@ func listUserDebtsByCreditorID(creditorDiscordID string) (string, error) {
         FROM user_debts ud
     	JOIN users u ON ud.debtor_id = u.id
     	WHERE ud.creditor_id = $1
-		AND ud.amount <> 0,
+		AND ud.amount <> 0
 		`,
 		creditorID,
 	)
