@@ -3,7 +3,7 @@ name: SSH Deploy
 on:
   push:
     branches:
-      - main  # Or your target branch
+      - main
 
 jobs:
   deploy:
@@ -23,4 +23,4 @@ jobs:
           script: |
             cd ~/billing-in-discord/
             echo "Now in billing-in-discord directory"
-            bash ./deploy.sh  # or any command/script you want to run
+            bash ./deploy.sh
