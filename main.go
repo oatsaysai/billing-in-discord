@@ -142,6 +142,7 @@ func callBill(s *discordgo.Session, m *discordgo.MessageCreate, genQR bool) {
 
 	targetQR := ""
 	balances := make(map[string]float64)
+	txIDsMap := make(map[string][]string) // Map to store txIDs for each person
 
 	// สร้าง regular expression สำหรับจับเฉพาะ user ID
 	re := regexp.MustCompile(`<@(\d+)>`)
@@ -214,24 +215,28 @@ func callBill(s *discordgo.Session, m *discordgo.MessageCreate, genQR bool) {
 				}
 
 				// Save the transaction
-				_, err = dbPool.Exec(
+				var txID int
+				err = dbPool.QueryRow(
 					context.Background(),
-					`INSERT INTO transactions (payer_id, payee_id, amount, description) VALUES ($1, $2, $3, $4)`,
+					`INSERT INTO transactions (payer_id, payee_id, amount, description) VALUES ($1, $2, $3, $4) RETURNING id`,
 					payerID, payeeID, amountPerPerson, parts[0],
-				)
+				).Scan(&txID)
 				if err != nil {
 					log.Printf("Failed to save transaction for user %s: %v", person, err)
 					continue
 				}
+				txIDsMap[person] = append(txIDsMap[person], strconv.Itoa(txID))
 			}
 		}
 	}
 
 	for person, balance := range balances {
+		if strings.HasPrefix(person, "tx_ids_") {
+			continue
+		}
 		fmt.Printf("%s: %.2f\n", person, balance)
 
 		// Update DB
-		// Get user IDs from the database
 		var payerID int
 		err := dbPool.QueryRow(
 			context.Background(),
@@ -305,7 +310,7 @@ func callBill(s *discordgo.Session, m *discordgo.MessageCreate, genQR bool) {
 
 			_, err = s.ChannelFileSendWithMessage(
 				m.ChannelID,
-				fmt.Sprintf("<@%s> %.2f บาท", person, balance),
+				fmt.Sprintf("<@%s> %.2f บาท (tx_id: %s)", person, balance, strings.Join(txIDsMap[person], ",")),
 				filename,
 				bytes.NewBuffer(buffer.Bytes()),
 			)
@@ -383,9 +388,17 @@ func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if err != nil || refMsg.Author == nil || refMsg.Author.ID != s.State.User.ID {
 		return
 	}
-	// Try to parse QR code message content
-	amount, payerDiscordID, err := parseQRMessageContent(refMsg.Content)
+
+	// // Try to parse QR code message content
+	// amount, payerDiscordID, err := parseQRMessageContent(refMsg.Content)
+	// if err != nil {
+	// 	return
+	// }
+
+	// Parse message content for amount and tx_ids
+	amount, txIDs, err := parseMessageWithTxIDs(refMsg.Content)
 	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "Invalid message format. Please use the correct format.")
 		return
 	}
 
@@ -423,28 +436,59 @@ func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	// Find matching transaction
-	txID, err := findMatchingTransaction(payerDiscordID, refMsg.Author.ID, amount)
-	if err != nil {
-		s.ChannelMessageSend(m.ChannelID, "No matching transaction found for this slip.")
-		return
+	for _, txID := range txIDs {
+		// Get transaction detail from the database
+		var payerID, payeeID string
+		var txAmount float64
+		err = dbPool.QueryRow(
+			context.Background(),
+			`SELECT payer_id, payee_id, amount FROM transactions WHERE id = $1`,
+			txID,
+		).Scan(&payerID, &payeeID, &txAmount)
+		if err != nil {
+			log.Printf("failed to retrieve transaction with id %s: %v", txID, err)
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Transaction with ID %d not found.", txID))
+			continue
+		}
+
+		err = markTransactionPaidAndUpdateDebt(txID)
+		if err != nil {
+			s.ChannelMessageSend(m.ChannelID, "Failed to update transaction as paid.")
+			return
+		}
+
+		// Notify with slip details
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
+			"✅ Slip processed successfully.\n- Tx: <@%s> → <@%s> (%.2f บาท)\n- Sender: %s (%s)\n- Receiver: %s (%s)\n- Date: %s\n- Ref: %s",
+			payerID, payeeID, amount,
+			verifyResp.Data.SenderName, verifyResp.Data.SenderID,
+			verifyResp.Data.ReceiverName, verifyResp.Data.ReceiverID,
+			verifyResp.Data.Date, verifyResp.Data.Ref,
+		))
 	}
 
-	// Mark as paid and update debt
-	err = markTransactionPaidAndUpdateDebt(txID)
-	if err != nil {
-		s.ChannelMessageSend(m.ChannelID, "Failed to update transaction as paid.")
-		return
-	}
+	// // Find matching transaction
+	// txID, err := findMatchingTransaction(payerDiscordID, refMsg.Author.ID, amount)
+	// if err != nil {
+	// 	s.ChannelMessageSend(m.ChannelID, "No matching transaction found for this slip.")
+	// 	return
+	// }
 
-	// Notify with slip details
-	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
-		"✅ Slip processed successfully.\n- Tx: <@%s> → <@%s> (%.2f บาท)\n- Sender: %s (%s)\n- Receiver: %s (%s)\n- Date: %s\n- Ref: %s",
-		payerDiscordID, m.Author.ID, amount,
-		verifyResp.Data.SenderName, verifyResp.Data.SenderID,
-		verifyResp.Data.ReceiverName, verifyResp.Data.ReceiverID,
-		verifyResp.Data.Date, verifyResp.Data.Ref,
-	))
+	// // Mark as paid and update debt
+	// err = markTransactionPaidAndUpdateDebt(txID)
+	// if err != nil {
+	// 	s.ChannelMessageSend(m.ChannelID, "Failed to update transaction as paid.")
+	// 	return
+	// }
+
+	// // Notify with slip details
+	// s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
+	// 	"✅ Slip processed successfully.\n- Tx: <@%s> → <@%s> (%.2f บาท)\n- Sender: %s (%s)\n- Receiver: %s (%s)\n- Date: %s\n- Ref: %s",
+	// 	payerDiscordID, m.Author.ID, amount,
+	// 	verifyResp.Data.SenderName, verifyResp.Data.SenderID,
+	// 	verifyResp.Data.ReceiverName, verifyResp.Data.ReceiverID,
+	// 	verifyResp.Data.Date, verifyResp.Data.Ref,
+	// ))
 }
 
 type VerifySlipResponse struct {
@@ -898,6 +942,36 @@ func markTransactionPaidAndUpdateDebt(txID int) error {
 		amount, payerID, payeeID,
 	)
 	return err
+}
+
+func parseMessageWithTxIDs(content string) (amount float64, txIDs []int, err error) {
+	// Regular expression to match the format: <@user> amount บาท (tx_id: id1,id2,...)
+	re := regexp.MustCompile(`<@\d+> ([\d.]+) บาท \(tx_id: ([0-9,]+)\)`)
+	matches := re.FindStringSubmatch(content)
+
+	if len(matches) != 3 {
+		return 0, nil, fmt.Errorf("invalid message format")
+	}
+
+	// Parse amount
+	amount, err = strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return 0, nil, fmt.Errorf("invalid amount: %v", err)
+	}
+
+	// Parse transaction IDs
+	txIDStrings := strings.Split(matches[2], ",")
+	txIDs = make([]int, 0, len(txIDStrings))
+
+	for _, idStr := range txIDStrings {
+		id, err := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
+		if err != nil {
+			return 0, nil, fmt.Errorf("invalid transaction ID: %v", err)
+		}
+		txIDs = append(txIDs, int(id))
+	}
+
+	return amount, txIDs, nil
 }
 
 func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
