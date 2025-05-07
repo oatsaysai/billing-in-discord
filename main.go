@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -182,11 +183,6 @@ func callBill(s *discordgo.Session, m *discordgo.MessageCreate, genQR bool) {
 				}
 			}
 
-			// // แสดงผล user ID ทั้งหมดที่พบ
-			// for _, userId := range userIds {
-			// 	fmt.Println("Found user ID:", userId)
-			// }
-
 			parts := strings.Fields(msg)
 			price, _ := strconv.ParseFloat(parts[1], 64)
 
@@ -320,54 +316,34 @@ func callBill(s *discordgo.Session, m *discordgo.MessageCreate, genQR bool) {
 	}
 }
 
-type VerifySlipParams struct {
-	RefNbr string `json:"refNbr"`
-	Amount string `json:"amount"`
-	Token  string `json:"token"`
-}
-
-type VerifySlipResponse struct {
-	Success       bool   `json:"success"`
-	StatusMessage string `json:"statusMessage"`
-	Data          struct {
-		ReceivingBank string `json:"receivingBank"`
-		SendingBank   string `json:"sendingBank"`
-		TransRef      string `json:"transRef"`
-		TransDate     string `json:"transDate"`
-		TransTime     string `json:"transTime"`
-		Sender        struct {
-			DisplayName string `json:"displayName"`
-			Name        string `json:"name"`
-			Account     struct {
-				Value string `json:"value"`
-			} `json:"account"`
-		} `json:"sender"`
-		Receiver struct {
-			DisplayName string `json:"displayName"`
-			Name        string `json:"name"`
-		} `json:"receiver"`
-		Amount float64 `json:"amount"`
-		Ref1   string  `json:"ref1"`
-		Ref2   string  `json:"ref2"`
-		Ref3   string  `json:"ref3"`
-	} `json:"data"`
-}
-
-func VerifySlip(url string, data VerifySlipParams) (*VerifySlipResponse, error) {
-	jsonData, err := json.Marshal(data)
+func VerifySlip(amount float64, imgPath string) (*VerifySlipResponse, error) {
+	// Read image file
+	imgBytes, err := os.ReadFile(imgPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read image file: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	// Encode to base64
+	imgBase64 := base64.StdEncoding.EncodeToString(imgBytes)
 
+	// Prepare request payload
+	payload := map[string]string{
+		"img": fmt.Sprintf("data:image/png;base64,%s", imgBase64),
+	}
+
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal JSON: %v", err)
+	}
+
+	// Prepare request with the correct URL format
+	url := fmt.Sprintf("https://slip-c.oiioioiiioooioio.download/api/slip/%.2f", amount)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "PostmanRuntime/7.42.0")
-	// req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -376,31 +352,130 @@ func VerifySlip(url string, data VerifySlipParams) (*VerifySlipResponse, error) 
 				InsecureSkipVerify: true,
 			},
 		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return nil // Follow redirect
-		},
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
-
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("res body: %s", body)
-
-	var res VerifySlipResponse
-	if err := json.Unmarshal(body, &res); err != nil {
-		return nil, err
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %v", err)
 	}
 
-	return &res, nil
+	var result VerifySlipResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %v, body: %s", err, string(body))
+	}
+
+	return &result, nil
+}
+
+func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
+	// Only process if this is a reply to a bot message with an image
+	if m.Message.MessageReference == nil || len(m.Attachments) == 0 {
+		return
+	}
+	// Fetch the referenced message
+	refMsg, err := s.ChannelMessage(m.ChannelID, m.Message.MessageReference.MessageID)
+	if err != nil || refMsg.Author == nil || refMsg.Author.ID != s.State.User.ID {
+		return
+	}
+	// Try to parse QR code message content
+	amount, payerDiscordID, err := parseQRMessageContent(refMsg.Content)
+	if err != nil {
+		return
+	}
+	// Only process if the reply contains an image
+	var slipURL string
+	for _, att := range m.Attachments {
+		if strings.HasPrefix(att.ContentType, "image/") {
+			slipURL = att.URL
+			break
+		}
+	}
+	if slipURL == "" {
+		return
+	}
+
+	// Download slip image
+	tmpFile := fmt.Sprintf("slip_%s", m.ID)
+	err = DownloadFile(tmpFile, slipURL)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "Failed to download slip image.")
+		return
+	}
+	defer os.Remove(tmpFile)
+
+	// Call slip verification API with the new format
+	verifyResp, err := VerifySlip(amount, tmpFile)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Slip verification failed: %v", err))
+		return
+	}
+
+	// Check amount matches
+	if verifyResp.Data.Amount != amount {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Slip amount (%.2f) does not match the requested amount (%.2f).", verifyResp.Data.Amount, amount))
+		return
+	}
+
+	// Find matching transaction
+	txID, err := findMatchingTransaction(payerDiscordID, m.Author.ID, amount)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "No matching transaction found for this slip.")
+		return
+	}
+
+	// Mark as paid and update debt
+	err = markTransactionPaidAndUpdateDebt(txID)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "Failed to update transaction as paid.")
+		return
+	}
+
+	// Notify with slip details
+	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
+		"✅ Slip processed successfully.\n- Tx: <@%s> → <@%s> (%.2f บาท)\n- Sender: %s (%s)\n- Receiver: %s (%s)\n- Date: %s\n- Ref: %s",
+		payerDiscordID, m.Author.ID, amount,
+		verifyResp.Data.SenderName, verifyResp.Data.SenderID,
+		verifyResp.Data.ReceiverName, verifyResp.Data.ReceiverID,
+		verifyResp.Data.Date, verifyResp.Data.Ref,
+	))
+}
+
+type VerifySlipResponse struct {
+	Message string `json:"message"`
+	Data    struct {
+		Ref               string  `json:"ref"`
+		Date              string  `json:"date"`
+		SenderBank        string  `json:"sender_bank"`
+		SenderName        string  `json:"sender_name"`
+		SenderID          string  `json:"sender_id"`
+		ReceiverBank      string  `json:"receiver_bank"`
+		ReceiverName      string  `json:"receiver_name"`
+		ReceiverID        string  `json:"receiver_id"`
+		Reference1        string  `json:"reference_1"`
+		Reference2        string  `json:"reference_2"`
+		Reference3        string  `json:"reference_3"`
+		Amount            float64 `json:"amount"`
+		SenderBankDetails struct {
+			Code         string `json:"code"`
+			Name         string `json:"name"`
+			OfficialName string `json:"official_name"`
+			SwiftCode    string `json:"swift_code"`
+			Color        string `json:"color"`
+		} `json:"sender_bank_details"`
+		ReceiverBankDetails struct {
+			Code         string `json:"code"`
+			Name         string `json:"name"`
+			OfficialName string `json:"official_name"`
+			SwiftCode    string `json:"swift_code"`
+			Color        string `json:"color"`
+		} `json:"receiver_bank_details"`
+	} `json:"data"`
 }
 
 func showTxByPayerID(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -766,11 +841,72 @@ func showHelp(s *discordgo.Session, m *discordgo.MessageCreate) {
 	s.ChannelMessageSend(m.ChannelID, helpMessage)
 }
 
+func parseQRMessageContent(content string) (amount float64, userID string, err error) {
+	re := regexp.MustCompile(`<@(\d+)> ([\d.]+) บาท`)
+	matches := re.FindStringSubmatch(content)
+	if len(matches) == 3 {
+		userID = matches[1]
+		amount, err = strconv.ParseFloat(matches[2], 64)
+		return
+	}
+	return 0, "", fmt.Errorf("not a QR code message")
+}
+
+func findMatchingTransaction(payerDiscordID, payeeDiscordID string, amount float64) (int, error) {
+	var payerID, payeeID int
+	err := dbPool.QueryRow(context.Background(), `SELECT id FROM users WHERE discord_id = $1`, payerDiscordID).Scan(&payerID)
+	if err != nil {
+		return 0, fmt.Errorf("payer not found")
+	}
+	err = dbPool.QueryRow(context.Background(), `SELECT id FROM users WHERE discord_id = $1`, payeeDiscordID).Scan(&payeeID)
+	if err != nil {
+		return 0, fmt.Errorf("payee not found")
+	}
+	var txID int
+	err = dbPool.QueryRow(
+		context.Background(),
+		`SELECT id FROM transactions WHERE payer_id = $1 AND payee_id = $2 AND amount = $3 AND already_paid = false ORDER BY created_at DESC LIMIT 1`,
+		payerID, payeeID, amount,
+	).Scan(&txID)
+	if err != nil {
+		return 0, fmt.Errorf("no matching transaction")
+	}
+	return txID, nil
+}
+
+func markTransactionPaidAndUpdateDebt(txID int) error {
+	var payerID, payeeID int
+	var amount float64
+	err := dbPool.QueryRow(
+		context.Background(),
+		`SELECT payer_id, payee_id, amount FROM transactions WHERE id = $1`, txID,
+	).Scan(&payerID, &payeeID, &amount)
+	if err != nil {
+		return err
+	}
+	_, err = dbPool.Exec(
+		context.Background(),
+		`UPDATE transactions SET already_paid = TRUE WHERE id = $1`, txID,
+	)
+	if err != nil {
+		return err
+	}
+	_, err = dbPool.Exec(
+		context.Background(),
+		`UPDATE user_debts SET amount = amount - $1, updated_at = CURRENT_TIMESTAMP WHERE debtor_id = $2 AND creditor_id = $3`,
+		amount, payerID, payeeID,
+	)
+	return err
+}
+
 func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	if m.Author.ID == s.State.User.ID { // Ignore the bot's own messages
 		return
 	}
+
+	// Automatic slip verification on reply to QR code
+	handleSlipVerification(s, m)
 
 	if strings.Contains(m.Message.Content, "!genQR") {
 		genQR(s, m)
