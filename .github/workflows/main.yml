@@ -23,4 +23,6 @@ jobs:
           script: |
             cd ~/billing-in-discord/
             echo "Now in billing-in-discord directory"
+            git pull
+            echo "Pulled latest changes"
             bash ./deploy.sh
