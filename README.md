@@ -4,12 +4,13 @@ A Discord bot for managing bill splitting, expense tracking, and debt settlement
 
 ## Features
 
-- **Bill Splitting:** Split expenses equally among multiple users
-- **QR Code Generation:** Generate PromptPay QR codes for payments
-- **Payment Verification:** Verify payment slips automatically
-- **Debt Tracking:** Track debts between users
-- **Transaction History:** View transaction history by payer or payee
-- **Debt Settlement:** Mark transactions as paid and update debts
+- **Bill Splitting:** Split expenses equally among multiple users.
+- **QR Code Generation:** Generate PromptPay QR codes for payments.
+- **Debt Tracking:** Track debts between users.
+- **Transaction History:** View transaction history by payer or payee.
+- **Debt Settlement:** Mark transactions as paid and update debts.
+- **Multi-Item Bills:** Manage bills with multiple items interactively.
+- **Slip Verification:** Automatically verify payment slips and update debts.
 
 ## Prerequisites
 
@@ -84,55 +85,52 @@ docker run -d --name billing-bot --network host -v $(pwd)/config.yaml:/config.ya
 
 ## Bot Commands
 
-### Bill Splitting
+### Bill Management
 
-- **!genQR <PromptPayID>**: Generate a QR code for individual payments
-  ```
-  !genQR 0891234567
-  ค่าขนม 100 @Oat
-  ```
-
-- **!calBill <PromptPayID>**: Split a bill among multiple users and generate QR codes
-  ```
-  !calBill 0891234567
-  ค่าอาหาร 300 @Oat @Bom @Mint
-  ค่าน้ำ 90 @Oat @Bom
-  ```
-
-- **!updateDept**: Update debts without generating QR codes
-  ```
-  !updateDept
-  ค่าอาหาร 300 @Oat @Bom @Mint
-  ```
-
-### Transaction Management
-
-- **!showTxByPayer @user**: Show the latest 20 transactions where the mentioned user is the payer
-- **!showTxByPayee @user**: Show the latest 20 transactions where the mentioned user is the payee
-- **!updatePaid <tx_id1>,<tx_id2>,...**: Mark transactions as paid and update debts
+- **!bill [PromptPayID]**: Create a multi-item bill. Optionally specify a PromptPay ID for QR code generation.
+  - Example:
+    ```text
+    !bill 0812345678
+    100 for coffee with @Alice @Bob
+    200 for lunch with @Charlie @Alice
+    ```
+- **!qr <amount> to @user for <description> <PromptPayID>**: Generate a QR code for a specific payment.
 
 ### Debt Tracking
 
-- **!listDebtsByDebtor @user**: List all debts for the mentioned user as a debtor
-- **!listDebtsByCreditor @user**: List all debts owed to the mentioned user as a creditor
+- **!mydebts**: Show debts you owe to others.
+- **!owedtome** or **!mydues**: Show debts others owe to you.
+- **!debts @user**: Show debts of a specific user.
+- **!dues @user**: Show dues owed to a specific user.
+
+### Payment Management
+
+- **!paid <TxID1>,<TxID2>,...**: Mark transactions as paid and update debts.
+
+### Slip Verification
+
+1. Reply to a QR code message from the bot.
+2. Attach the payment slip image in your reply.
+3. The bot will verify the payment amount and update the transaction status.
 
 ### Help
 
-- **!help**: Display the list of available commands
+- **!help**: Display the list of available commands.
+- **!help <command>**: Get detailed help for a specific command.
 
 ## Payment Verification
 
-The bot can verify payment slips automatically. To verify a payment:
-1. Reply to a QR code message from the bot
-2. Attach the payment slip image in your reply
-3. The bot will verify the payment amount and update the transaction status
+The bot supports automatic slip verification for payments:
+1. Reply to a QR code message from the bot.
+2. Attach the payment slip image in your reply.
+3. The bot will verify the payment amount and update the transaction status.
 
 ## Database Schema
 
 The application uses three main tables:
-- **users**: Stores Discord user IDs
-- **transactions**: Records all billing transactions
-- **user_debts**: Tracks current debt balances between users
+- **users**: Stores Discord user IDs.
+- **transactions**: Records all billing transactions.
+- **user_debts**: Tracks current debt balances between users.
 
 ## Development
 
