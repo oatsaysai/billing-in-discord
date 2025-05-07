@@ -1,0 +1,26 @@
+name: SSH Deploy
+
+on:
+  push:
+    branches:
+      - main  # Or your target branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: SSH and run script
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            cd ~/billing-in-discord/
+            echo "Now in billing-in-discord directory"
+            bash ./deploy.sh  # or any command/script you want to run
