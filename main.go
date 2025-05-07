@@ -389,12 +389,6 @@ func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	// // Try to parse QR code message content
-	// amount, payerDiscordID, err := parseQRMessageContent(refMsg.Content)
-	// if err != nil {
-	// 	return
-	// }
-
 	// Parse message content for amount and tx_ids
 	amount, txIDs, err := parseMessageWithTxIDs(refMsg.Content)
 	if err != nil {
@@ -438,7 +432,7 @@ func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	for _, txID := range txIDs {
 		// Get transaction detail from the database
-		var payerID, payeeID string
+		var payerID, payeeID int64
 		var txAmount float64
 		err = dbPool.QueryRow(
 			context.Background(),
@@ -446,7 +440,7 @@ func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 			txID,
 		).Scan(&payerID, &payeeID, &txAmount)
 		if err != nil {
-			log.Printf("failed to retrieve transaction with id %s: %v", txID, err)
+			log.Printf("failed to retrieve transaction with id %d: %v", txID, err)
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Transaction with ID %d not found.", txID))
 			continue
 		}
@@ -457,38 +451,28 @@ func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 			return
 		}
 
+		// Get payee discord ID
+		var payeeDiscordID string
+		err = dbPool.QueryRow(
+			context.Background(),
+			`SELECT discord_id FROM users WHERE id = $1`,
+			payeeID,
+		).Scan(&payeeDiscordID)
+		if err != nil {
+			log.Printf("failed to retrieve payee discord ID for id %d: %v", payeeID, err)
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Payee with ID %d not found.", payeeID))
+			continue
+		}
+
 		// Notify with slip details
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
 			"✅ Slip processed successfully.\n- Tx: <@%s> → <@%s> (%.2f บาท)\n- Sender: %s (%s)\n- Receiver: %s (%s)\n- Date: %s\n- Ref: %s",
-			payerID, payeeID, amount,
+			m.Author.ID, payeeDiscordID, amount,
 			verifyResp.Data.SenderName, verifyResp.Data.SenderID,
 			verifyResp.Data.ReceiverName, verifyResp.Data.ReceiverID,
 			verifyResp.Data.Date, verifyResp.Data.Ref,
 		))
 	}
-
-	// // Find matching transaction
-	// txID, err := findMatchingTransaction(payerDiscordID, refMsg.Author.ID, amount)
-	// if err != nil {
-	// 	s.ChannelMessageSend(m.ChannelID, "No matching transaction found for this slip.")
-	// 	return
-	// }
-
-	// // Mark as paid and update debt
-	// err = markTransactionPaidAndUpdateDebt(txID)
-	// if err != nil {
-	// 	s.ChannelMessageSend(m.ChannelID, "Failed to update transaction as paid.")
-	// 	return
-	// }
-
-	// // Notify with slip details
-	// s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
-	// 	"✅ Slip processed successfully.\n- Tx: <@%s> → <@%s> (%.2f บาท)\n- Sender: %s (%s)\n- Receiver: %s (%s)\n- Date: %s\n- Ref: %s",
-	// 	payerDiscordID, m.Author.ID, amount,
-	// 	verifyResp.Data.SenderName, verifyResp.Data.SenderID,
-	// 	verifyResp.Data.ReceiverName, verifyResp.Data.ReceiverID,
-	// 	verifyResp.Data.Date, verifyResp.Data.Ref,
-	// ))
 }
 
 type VerifySlipResponse struct {
