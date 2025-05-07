@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -14,7 +15,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	pp "github.com/Frontware/promptpay"
@@ -31,54 +31,31 @@ var (
 type BillItem struct {
 	Description string
 	Amount      float64
-	SharedWith  []string
+	SharedWith  []string // Slice of Discord User IDs
 }
 
-type MultiItemBill struct {
-	InitiatorID string
-	ChannelID   string
-	PromptPayID string
-	Items       []BillItem
-	IsActive    bool
-	Timestamp   time.Time
-	MessageID   string
-}
+// Removed MultiItemBill struct as stateful multi-line input is removed
 
 var (
-	activeBills      = make(map[string]*MultiItemBill)
-	activeBillsMutex = &sync.RWMutex{}
+	// Removed activeBills map & mutex
 	userMentionRegex = regexp.MustCompile(`<@!?(\d+)>`)
 	txIDRegex        = regexp.MustCompile(`\(TxID:\s?(\d+)\)`)
+	txIDsRegex       = regexp.MustCompile(`\(TxIDs:\s?([\d,]+)\)`)
 )
 
+// messageHandler routes incoming messages to appropriate handlers.
 func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.ID == s.State.User.ID {
 		return
 	}
 
-	if m.MessageReference != nil && m.MessageReference.MessageID != "" {
-		activeBillsMutex.RLock()
-		bill, isActiveInChannel := activeBills[m.ChannelID]
-		activeBillsMutex.RUnlock()
-
-		if isActiveInChannel && bill.IsActive && bill.InitiatorID == m.Author.ID && bill.MessageID == m.MessageReference.MessageID {
-			if strings.ToLower(strings.TrimSpace(m.Content)) == "!bill finish" {
-				go handleBillFinish(s, m, bill)
-				return
-			}
-			if parsedItem, err := parseBillItem(m.Content); err == nil {
-				activeBillsMutex.Lock()
-				bill.Items = append(bill.Items, parsedItem)
-				activeBillsMutex.Unlock()
-				s.MessageReactionAdd(m.ChannelID, m.ID, "👍")
-				return
-			}
-		} else if len(m.Attachments) > 0 {
-			go handleSlipVerification(s, m)
-			return
-		}
+	// Prioritize slip verification replies
+	if m.MessageReference != nil && m.MessageReference.MessageID != "" && len(m.Attachments) > 0 {
+		go handleSlipVerification(s, m)
+		return
 	}
 
+	// Handle regular commands
 	content := strings.TrimSpace(m.Content)
 	args := strings.Fields(content)
 	if len(args) == 0 {
@@ -88,20 +65,7 @@ func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	switch {
 	case command == "!bill":
-		if len(args) > 1 && strings.ToLower(args[1]) == "start" {
-			go handleBillStart(s, m)
-		} else if len(args) > 1 && strings.ToLower(args[1]) == "finish" {
-			activeBillsMutex.RLock()
-			bill, isActiveInChannel := activeBills[m.ChannelID]
-			activeBillsMutex.RUnlock()
-			if isActiveInChannel && bill.IsActive && bill.InitiatorID == m.Author.ID {
-				go handleBillFinish(s, m, bill)
-			} else {
-				sendErrorMessage(s, m.ChannelID, "ไม่พบบิลที่กำลังดำเนินการอยู่ หรือคุณไม่ใช่คนที่เริ่มบิลนี้")
-			}
-		} else {
-			go handleSingleLineBill(s, m)
-		}
+		go handleBillCommand(s, m)
 	case command == "!qr":
 		go handleQrCommand(s, m)
 	case command == "!mydebts":
@@ -121,61 +85,7 @@ func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 }
 
-func parseSingleLineBillArgs(content string) (amount float64, description string, mentions []string, promptPayID string, err error) {
-	normalizedContent := strings.ToLower(content)
-	trimmedContent := strings.TrimSpace(strings.TrimPrefix(normalizedContent, "!bill "))
-	parts := strings.Fields(trimmedContent)
-	if len(parts) < 4 {
-		return 0, "", nil, "", fmt.Errorf("รูปแบบ `!bill` ไม่ถูกต้อง โปรดใช้: `!bill <จำนวนเงิน> for <รายละเอียด> with @user1 @user2... [YourPromptPayID]`")
-	}
-	parsedAmount, amountErr := strconv.ParseFloat(parts[0], 64)
-	if amountErr != nil {
-		return 0, "", nil, "", fmt.Errorf("จำนวนเงิน '%s' ไม่ถูกต้อง ต้องเป็นตัวเลข", parts[0])
-	}
-	amount = parsedAmount
-	forIndex, withIndex := -1, -1
-	for i, p := range parts {
-		if p == "for" && forIndex == -1 {
-			forIndex = i
-		}
-		if p == "with" && withIndex == -1 {
-			withIndex = i
-		}
-	}
-	if forIndex != 1 || withIndex == -1 || forIndex >= withIndex {
-		return 0, "", nil, "", fmt.Errorf("รูปแบบคำสั่งผิดพลาด: โปรดตรวจสอบว่า 'for' อยู่หลังจำนวนเงิน และ 'with' อยู่หลังรายละเอียด")
-	}
-	description = strings.Join(parts[forIndex+1:withIndex], " ")
-	if description == "" {
-		return 0, "", nil, "", fmt.Errorf("รายละเอียดห้ามว่าง")
-	}
-	mentionAndPPIDParts := parts[withIndex+1:]
-	if len(mentionAndPPIDParts) == 0 {
-		return 0, "", nil, "", fmt.Errorf("ไม่ได้ระบุผู้ใช้หลัง 'with'")
-	}
-	var foundMentions []string
-	var potentialPPID string
-	for i, part := range mentionAndPPIDParts {
-		if userMentionRegex.MatchString(part) {
-			match := userMentionRegex.FindStringSubmatch(part)
-			if len(match) > 1 {
-				foundMentions = append(foundMentions, match[1])
-			}
-		} else if i == len(mentionAndPPIDParts)-1 {
-			if regexp.MustCompile(`^(\d{10}|\d{13}|ewallet-\d+)$`).MatchString(part) {
-				potentialPPID = part
-			} else {
-				return 0, "", nil, "", fmt.Errorf("การระบุผู้ใช้หรือ PromptPayID ไม่ถูกต้องที่ส่วนท้าย: '%s'", part)
-			}
-		} else {
-			return 0, "", nil, "", fmt.Errorf("พบส่วนที่ไม่ถูกต้อง '%s' ในรายชื่อผู้ใช้", part)
-		}
-	}
-	if len(foundMentions) == 0 {
-		return 0, "", nil, "", fmt.Errorf("ไม่ได้ระบุผู้ใช้ที่ถูกต้องด้วยเครื่องหมาย @")
-	}
-	return amount, description, foundMentions, potentialPPID, nil
-}
+// --- Parsing Helper Functions ---
 
 func parseQrArgs(content string) (amount float64, toUser string, description string, promptPayID string, err error) {
 	normalizedContent := strings.ToLower(content)
@@ -229,18 +139,17 @@ func parseRequestPaymentArgs(content string) (debtorDiscordID string, creditorPr
 	return debtorDiscordID, creditorPromptPayID, nil
 }
 
-func parseBillItem(content string) (BillItem, error) {
-	var item BillItem
-	normalizedContent := strings.ToLower(content)
+func parseBillItem(line string) (amount float64, description string, mentions []string, err error) {
+	normalizedContent := strings.ToLower(line)
 	parts := strings.Fields(normalizedContent)
 	if len(parts) < 4 {
-		return item, fmt.Errorf("รูปแบบรายการไม่ถูกต้อง โปรดใช้: `<จำนวนเงิน> for <รายละเอียด> with @user1 @user2...`")
+		return 0, "", nil, fmt.Errorf("รูปแบบรายการไม่ถูกต้อง โปรดใช้: `<จำนวนเงิน> for <รายละเอียด> with @user1 @user2...`")
 	}
 	amountNum, err := strconv.ParseFloat(parts[0], 64)
 	if err != nil {
-		return item, fmt.Errorf("จำนวนเงินในรายการไม่ถูกต้อง: '%s'", parts[0])
+		return 0, "", nil, fmt.Errorf("จำนวนเงินในรายการไม่ถูกต้อง: '%s'", parts[0])
 	}
-	item.Amount = amountNum
+	amount = amountNum
 	forIndex, withIndex := -1, -1
 	for i, p := range parts {
 		if p == "for" && forIndex == -1 {
@@ -251,27 +160,29 @@ func parseBillItem(content string) (BillItem, error) {
 		}
 	}
 	if forIndex != 1 || withIndex == -1 || forIndex >= withIndex {
-		return item, fmt.Errorf("รูปแบบรายการไม่ถูกต้อง: โปรดตรวจสอบว่า 'for' อยู่หลังจำนวนเงิน และ 'with' อยู่หลังรายละเอียด")
+		return 0, "", nil, fmt.Errorf("รูปแบบรายการไม่ถูกต้อง: โปรดตรวจสอบว่า 'for' อยู่หลังจำนวนเงิน และ 'with' อยู่หลังรายละเอียด")
 	}
-	item.Description = strings.Join(parts[forIndex+1:withIndex], " ")
-	if item.Description == "" {
-		return item, fmt.Errorf("รายละเอียดรายการห้ามว่าง")
+	description = strings.Join(parts[forIndex+1:withIndex], " ")
+	if description == "" {
+		return 0, "", nil, fmt.Errorf("รายละเอียดรายการห้ามว่าง")
 	}
 	mentionParts := parts[withIndex+1:]
 	if len(mentionParts) == 0 {
-		return item, fmt.Errorf("ไม่ได้ระบุผู้ใช้สำหรับรายการ '%s'", item.Description)
+		return 0, "", nil, fmt.Errorf("ไม่ได้ระบุผู้ใช้สำหรับรายการ '%s'", description)
 	}
+	var foundMentions []string
 	for _, p := range mentionParts {
 		if userMentionRegex.MatchString(p) {
-			item.SharedWith = append(item.SharedWith, userMentionRegex.FindStringSubmatch(p)[1])
+			foundMentions = append(foundMentions, userMentionRegex.FindStringSubmatch(p)[1])
 		} else {
-			return item, fmt.Errorf("การระบุผู้ใช้ไม่ถูกต้อง '%s' ในรายการ '%s'", p, item.Description)
+			return 0, "", nil, fmt.Errorf("การระบุผู้ใช้ไม่ถูกต้อง '%s' ในรายการ '%s'", p, description)
 		}
 	}
-	if len(item.SharedWith) == 0 {
-		return item, fmt.Errorf("ไม่ได้ระบุผู้ใช้ที่ถูกต้องสำหรับรายการ '%s'", item.Description)
+	if len(foundMentions) == 0 {
+		return 0, "", nil, fmt.Errorf("ไม่ได้ระบุผู้ใช้ที่ถูกต้องสำหรับรายการ '%s'", description)
 	}
-	return item, nil
+	mentions = foundMentions
+	return amount, description, mentions, nil
 }
 
 func sendErrorMessage(s *discordgo.Session, channelID string, message string) {
@@ -300,7 +211,7 @@ func getOrCreateDBUser(discordID string) (int, error) {
 	return dbUserID, nil
 }
 
-func generateAndSendQrCode(s *discordgo.Session, channelID string, promptPayNum string, amount float64, targetUserDiscordID string, description string, txID int) {
+func generateAndSendQrCode(s *discordgo.Session, channelID string, promptPayNum string, amount float64, targetUserDiscordID string, description string, txIDs []int) {
 	payment := pp.PromptPay{PromptPayID: promptPayNum, Amount: amount}
 	qrcodeStr, err := payment.Gen()
 	if err != nil {
@@ -338,8 +249,14 @@ func generateAndSendQrCode(s *discordgo.Session, channelID string, promptPayNum 
 	defer os.Remove(filename)
 
 	txIDString := ""
-	if txID > 0 {
-		txIDString = fmt.Sprintf(" (TxID: %d)", txID)
+	if len(txIDs) == 1 {
+		txIDString = fmt.Sprintf(" (TxID: %d)", txIDs[0])
+	} else if len(txIDs) > 1 {
+		var idStrs []string
+		for _, id := range txIDs {
+			idStrs = append(idStrs, strconv.Itoa(id))
+		}
+		txIDString = fmt.Sprintf(" (TxIDs: %s)", strings.Join(idStrs, ","))
 	}
 
 	msgContent := fmt.Sprintf("<@%s> กรุณาชำระ %.2f บาท สำหรับ \"%s\"%s\nหากต้องการยืนยันการชำระเงิน ตอบกลับข้อความนี้พร้อมแนบสลิปของคุณ", targetUserDiscordID, amount, description, txIDString)
@@ -353,165 +270,123 @@ func generateAndSendQrCode(s *discordgo.Session, channelID string, promptPayNum 
 	}
 }
 
-func handleBillStart(s *discordgo.Session, m *discordgo.MessageCreate) {
-	activeBillsMutex.Lock()
-	defer activeBillsMutex.Unlock()
-	if _, exists := activeBills[m.ChannelID]; exists {
-		sendErrorMessage(s, m.ChannelID, "มีบิลที่กำลังดำเนินการอยู่ในช่องนี้แล้ว กรุณาสิ้นสุดบิลนั้นด้วย `!bill finish`")
+// --- Command Handlers ---
+
+// handleBillCommand processes multi-line bill entries.
+func handleBillCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	lines := strings.Split(strings.TrimSpace(m.Content), "\n")
+	if len(lines) < 2 {
+		sendErrorMessage(s, m.ChannelID, "รูปแบบ `!bill` ไม่ถูกต้อง ต้องมีอย่างน้อย 2 บรรทัด (บรรทัดแรกคือคำสั่ง บรรทัดถัดไปคือรายการ)")
 		return
 	}
-	args := strings.Fields(strings.ToLower(m.Content))
+
+	firstLineParts := strings.Fields(lines[0])
+	if strings.ToLower(firstLineParts[0]) != "!bill" {
+		sendErrorMessage(s, m.ChannelID, "บรรทัดแรกต้องขึ้นต้นด้วย `!bill`")
+		return
+	}
 	var promptPayID string
-	if len(args) > 2 {
-		promptPayID = args[2]
+	if len(firstLineParts) > 1 {
+		promptPayID = firstLineParts[1]
 		if !regexp.MustCompile(`^(\d{10}|\d{13}|ewallet-\d+)$`).MatchString(promptPayID) {
-			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("PromptPayID ที่ระบุ '%s' ดูเหมือนจะไม่ถูกต้อง เริ่มบิลโดยไม่มี PromptPayID", promptPayID))
+			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("PromptPayID '%s' ในบรรทัดแรกดูเหมือนจะไม่ถูกต้อง จะดำเนินการต่อโดยไม่สร้าง QR", promptPayID))
 			promptPayID = ""
 		}
 	}
-	bill := &MultiItemBill{
-		InitiatorID: m.Author.ID, ChannelID: m.ChannelID, PromptPayID: promptPayID,
-		IsActive: true, Timestamp: time.Now(), Items: make([]BillItem, 0),
-	}
-	activeBills[m.ChannelID] = bill
-	msgContent := "เริ่มบิลใหม่แล้ว! "
-	if promptPayID != "" {
-		msgContent += fmt.Sprintf("PromptPay ID สำหรับ QR code คือ: `%s`. ", promptPayID)
-	} else {
-		msgContent += "ไม่ได้ระบุ PromptPay ID, จะไม่มีการสร้าง QR code. "
-	}
-	msgContent += "ตอบกลับ **ข้อความนี้** เพื่อเพิ่มรายการ โดยใช้รูปแบบ: `<จำนวนเงิน> for <รายละเอียด> with @user1 @user2...`\nพิมพ์ `!bill finish` (หรือตอบกลับ `!bill finish`) เมื่อเสร็จสิ้น"
-	botMsg, err := s.ChannelMessageSend(m.ChannelID, msgContent)
-	if err != nil {
-		log.Printf("Failed to send bill start confirmation: %v", err)
-		delete(activeBills, m.ChannelID)
-		return
-	}
-	bill.MessageID = botMsg.ID
-}
 
-func handleBillFinish(s *discordgo.Session, m *discordgo.MessageCreate, bill *MultiItemBill) {
-	activeBillsMutex.Lock()
-	currentBill, ok := activeBills[m.ChannelID]
-	if !ok || currentBill != bill || !bill.IsActive {
-		activeBillsMutex.Unlock()
-		sendErrorMessage(s, m.ChannelID, "ไม่พบบิลที่กำลังดำเนินการอยู่ หรือได้สิ้นสุดไปแล้ว")
-		return
-	}
-	bill.IsActive = false
-	activeBillsMutex.Unlock()
-
-	defer func() {
-		activeBillsMutex.Lock()
-		delete(activeBills, m.ChannelID)
-		activeBillsMutex.Unlock()
-	}()
-
-	if len(bill.Items) == 0 {
-		s.ChannelMessageSend(m.ChannelID, "ไม่มีรายการในบิล บิลถูกยกเลิก")
-		return
-	}
-	payeeDiscordID := bill.InitiatorID
-	payeeDbID, err := getOrCreateDBUser(payeeDiscordID)
-	if err != nil {
-		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดกับฐานข้อมูลสำหรับผู้เริ่มบิล <@%s>", payeeDiscordID))
-		return
-	}
-	userTotalDebts := make(map[string]float64)
-	var summary strings.Builder
-	summary.WriteString(fmt.Sprintf("สรุปบิลโดย <@%s>:\n", bill.InitiatorID))
-	totalBillAmount := 0.0
-	for _, item := range bill.Items {
-		totalBillAmount += item.Amount
-		summary.WriteString(fmt.Sprintf("- `%.2f` สำหรับ **%s**, หารกับ: ", item.Amount, item.Description))
-		for _, userID := range item.SharedWith {
-			summary.WriteString(fmt.Sprintf("<@%s> ", userID))
-		}
-		summary.WriteString("\n")
-		amountPerPerson := item.Amount / float64(len(item.SharedWith))
-		for _, payerDiscordID := range item.SharedWith {
-			userTotalDebts[payerDiscordID] += amountPerPerson
-			_, dbErr := getOrCreateDBUser(payerDiscordID)
-			if dbErr != nil {
-				log.Printf("Error DB user %s for item '%s': %v", payerDiscordID, item.Description, dbErr)
-				summary.WriteString(fmt.Sprintf("  (เกิดข้อผิดพลาดในการประมวลผล <@%s> สำหรับรายการนี้)\n", payerDiscordID))
-				continue
-			}
-		}
-	}
-	summary.WriteString(fmt.Sprintf("\n**ยอดรวมของบิล: %.2f บาท**\n", totalBillAmount))
-	summary.WriteString("\nหนี้สินที่สร้าง/อัปเดต:\n")
-	for payerDiscordID, totalOwed := range userTotalDebts {
-		payerDbID, dbErr := getOrCreateDBUser(payerDiscordID)
-		if dbErr != nil {
-			summary.WriteString(fmt.Sprintf("- เกิดข้อผิดพลาดในการอัปเดตหนี้สินสุดท้ายสำหรับ <@%s>: ไม่พบผู้ใช้ในฐานข้อมูล\n", payerDiscordID))
-			continue
-		}
-		debtErr := updateUserDebt(payerDbID, payeeDbID, totalOwed)
-		if debtErr != nil {
-			summary.WriteString(fmt.Sprintf("- เกิดข้อผิดพลาดในการอัปเดตหนี้สินสุดท้ายสำหรับ <@%s> ต่อ <@%s> เป็นจำนวน %.2f.\n", payerDiscordID, payeeDiscordID, totalOwed))
-		} else {
-			summary.WriteString(fmt.Sprintf("- <@%s> ตอนนี้เป็นหนี้ <@%s> เพิ่มเติม **%.2f บาท** จากบิลนี้.\n", payerDiscordID, payeeDiscordID, totalOwed))
-		}
-		if bill.PromptPayID != "" && totalOwed > 0.009 {
-			generateAndSendQrCode(s, m.ChannelID, bill.PromptPayID, totalOwed, payerDiscordID, "ยอดรวมจากบิล "+bill.Timestamp.Format("2006-01-02"), 0)
-		}
-	}
-	s.ChannelMessageSend(m.ChannelID, summary.String())
-	log.Printf("Bill finished for channel %s by %s", m.ChannelID, m.Author.ID)
-}
-
-func handleSingleLineBill(s *discordgo.Session, m *discordgo.MessageCreate) {
-	amount, description, mentions, promptPayID, err := parseSingleLineBillArgs(m.Content)
-	if err != nil {
-		sendErrorMessage(s, m.ChannelID, err.Error())
-		return
-	}
 	payeeDiscordID := m.Author.ID
 	payeeDbID, err := getOrCreateDBUser(payeeDiscordID)
 	if err != nil {
 		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดกับฐานข้อมูลสำหรับคุณ (<@%s>)", payeeDiscordID))
 		return
 	}
-	amountPerPerson := amount / float64(len(mentions))
-	if amountPerPerson < 0.01 && amount > 0 {
-		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("จำนวนเงินต่อคน (%.4f) น้อยเกินไปที่จะประมวลผลสำหรับบิลนี้ (%.2f)", amountPerPerson, amount))
-		return
-	}
 
-	var summary strings.Builder
-	summary.WriteString(fmt.Sprintf("<@%s> สร้างบิลจำนวน **%.2f บาท** สำหรับ \"%s\", หารกับ: ", m.Author.ID, amount, description))
-	for _, userID := range mentions {
-		summary.WriteString(fmt.Sprintf("<@%s> ", userID))
-	}
-	summary.WriteString(fmt.Sprintf("\nแต่ละคนต้องจ่าย **%.2f บาท**.\n", amountPerPerson))
-	s.ChannelMessageSend(m.ChannelID, summary.String())
+	userTotalDebts := make(map[string]float64)
+	userTxIDs := make(map[string][]int)
+	var billItemsSummary strings.Builder
+	billItemsSummary.WriteString(fmt.Sprintf("สรุปบิลโดย <@%s>:\n", m.Author.ID))
+	totalBillAmount := 0.0
+	hasErrors := false
 
-	for _, payerDiscordID := range mentions {
-		payerDbID, dbErr := getOrCreateDBUser(payerDiscordID)
-		if dbErr != nil {
-			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("- เกิดข้อผิดพลาดในการประมวลผลหนี้สินสำหรับ <@%s> (DB user error).", payerDiscordID))
-			continue
-		}
-		var txID int
-		txErr := dbPool.QueryRow(context.Background(),
-			`INSERT INTO transactions (payer_id, payee_id, amount, description) VALUES ($1, $2, $3, $4) RETURNING id`,
-			payerDbID, payeeDbID, amountPerPerson, description).Scan(&txID)
-		if txErr != nil {
-			log.Printf("Failed to save transaction for user %s, bill '%s': %v", payerDiscordID, description, txErr)
-			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("- เกิดข้อผิดพลาดในการบันทึก transaction สำหรับ <@%s>.", payerDiscordID))
+	for i, line := range lines[1:] {
+		lineNum := i + 2
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" {
 			continue
 		}
 
-		debtErr := updateUserDebt(payerDbID, payeeDbID, amountPerPerson)
-		if debtErr != nil {
-			log.Printf("Failed to update debt for user %s, bill '%s': %v", payerDiscordID, description, debtErr)
-			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("- เกิดข้อผิดพลาดในการอัปเดตยอดหนี้สำหรับ <@%s>.", payerDiscordID))
+		amount, description, mentions, parseErr := parseBillItem(trimmedLine)
+		if parseErr != nil {
+			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("บรรทัดที่ %d มีข้อผิดพลาด: %v", lineNum, parseErr))
+			hasErrors = true
+			continue
 		}
 
-		if promptPayID != "" && amountPerPerson > 0.009 {
-			generateAndSendQrCode(s, m.ChannelID, promptPayID, amountPerPerson, payerDiscordID, description, txID)
+		totalBillAmount += amount
+		billItemsSummary.WriteString(fmt.Sprintf("- `%.2f` สำหรับ **%s**, หารกับ: ", amount, description))
+		for _, uid := range mentions {
+			billItemsSummary.WriteString(fmt.Sprintf("<@%s> ", uid))
 		}
+		billItemsSummary.WriteString("\n")
+
+		amountPerPerson := amount / float64(len(mentions))
+		if amountPerPerson < 0.01 && amount > 0 {
+			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("บรรทัดที่ %d: จำนวนเงินต่อคนน้อยเกินไป (%.4f)", lineNum, amountPerPerson))
+			hasErrors = true
+			continue
+		}
+
+		for _, payerDiscordID := range mentions {
+			payerDbID, dbErr := getOrCreateDBUser(payerDiscordID)
+			if dbErr != nil {
+				log.Printf("Error DB user %s for item '%s' line %d: %v", payerDiscordID, description, lineNum, dbErr)
+				sendErrorMessage(s, m.ChannelID, fmt.Sprintf("บรรทัดที่ %d: เกิดข้อผิดพลาด DB สำหรับ <@%s>", lineNum, payerDiscordID))
+				hasErrors = true
+				continue
+			}
+
+			var txID int
+			txErr := dbPool.QueryRow(context.Background(),
+				`INSERT INTO transactions (payer_id, payee_id, amount, description) VALUES ($1, $2, $3, $4) RETURNING id`,
+				payerDbID, payeeDbID, amountPerPerson, description).Scan(&txID)
+			if txErr != nil {
+				log.Printf("Failed to save transaction for user %s, item '%s' line %d: %v", payerDiscordID, description, lineNum, txErr)
+				sendErrorMessage(s, m.ChannelID, fmt.Sprintf("บรรทัดที่ %d: เกิดข้อผิดพลาดในการบันทึก transaction สำหรับ <@%s>", lineNum, payerDiscordID))
+				hasErrors = true
+				continue
+			}
+
+			userTotalDebts[payerDiscordID] += amountPerPerson
+			userTxIDs[payerDiscordID] = append(userTxIDs[payerDiscordID], txID)
+
+			debtErr := updateUserDebt(payerDbID, payeeDbID, amountPerPerson)
+			if debtErr != nil {
+				log.Printf("Failed to update debt for user %s, item '%s' line %d: %v", payerDiscordID, description, lineNum, debtErr)
+				sendErrorMessage(s, m.ChannelID, fmt.Sprintf("บรรทัดที่ %d: เกิดข้อผิดพลาดในการอัปเดตยอดหนี้สำหรับ <@%s>", lineNum, payerDiscordID))
+				hasErrors = true
+			}
+		}
+	}
+
+	s.ChannelMessageSend(m.ChannelID, billItemsSummary.String())
+
+	if len(userTotalDebts) > 0 {
+		var qrSummary strings.Builder
+		qrSummary.WriteString(fmt.Sprintf("\n**ยอดรวมทั้งสิ้น: %.2f บาท**\n", totalBillAmount))
+		if hasErrors {
+			qrSummary.WriteString("⚠️ *มีข้อผิดพลาดเกิดขึ้นในการประมวลผลบางรายการ โปรดตรวจสอบข้อความก่อนหน้า*\n")
+		}
+		qrSummary.WriteString("\nสร้าง QR Code สำหรับชำระเงิน:\n")
+		s.ChannelMessageSend(m.ChannelID, qrSummary.String())
+
+		for payerDiscordID, totalOwed := range userTotalDebts {
+			if promptPayID != "" && totalOwed > 0.009 {
+				relevantTxIDs := userTxIDs[payerDiscordID]
+				generateAndSendQrCode(s, m.ChannelID, promptPayID, totalOwed, payerDiscordID, fmt.Sprintf("ยอดรวมจากบิลนี้โดย <@%s>", m.Author.ID), relevantTxIDs)
+			}
+		}
+	} else if !hasErrors {
+		s.ChannelMessageSend(m.ChannelID, "ไม่พบรายการที่ถูกต้องในบิล")
 	}
 }
 
@@ -548,7 +423,7 @@ func handleQrCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		log.Printf("Failed to update debt for !qr from %s to %s: %v", payeeDiscordID, toUserDiscordID, err)
 	}
 
-	generateAndSendQrCode(s, m.ChannelID, promptPayID, amount, toUserDiscordID, description, txID)
+	generateAndSendQrCode(s, m.ChannelID, promptPayID, amount, toUserDiscordID, description, []int{txID})
 }
 
 func handleRequestPayment(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -575,22 +450,90 @@ func handleRequestPayment(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	var debtAmount float64
-	query := `SELECT amount FROM user_debts WHERE debtor_id = $1 AND creditor_id = $2`
-	err = dbPool.QueryRow(context.Background(), query, debtorDbID, creditorDbID).Scan(&debtAmount)
-
+	var totalDebtAmount float64
+	queryTotal := `SELECT COALESCE(SUM(amount), 0) FROM user_debts WHERE debtor_id = $1 AND creditor_id = $2`
+	err = dbPool.QueryRow(context.Background(), queryTotal, debtorDbID, creditorDbID).Scan(&totalDebtAmount)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("ไม่พบหนี้สินที่ <@%s> ค้างชำระกับคุณ หรือเกิดข้อผิดพลาดในการค้นหา", debtorDiscordID))
-		log.Printf("Error querying debt for !request from creditor %s to debtor %s: %v", creditorDiscordID, debtorDiscordID, err)
+		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดในการค้นหายอดหนี้รวมที่ <@%s> ค้างชำระกับคุณ", debtorDiscordID))
+		log.Printf("Error querying total debt for !request from creditor %s to debtor %s: %v", creditorDiscordID, debtorDiscordID, err)
 		return
 	}
-	if debtAmount <= 0.009 {
+
+	if totalDebtAmount <= 0.009 {
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("ยอดเยี่ยม! <@%s> ไม่ได้ติดหนี้คุณอยู่", debtorDiscordID))
 		return
 	}
 
+	unpaidTxIDs, unpaidTxDetails, unpaidTotal, err := getUnpaidTransactionIDsAndDetails(debtorDbID, creditorDbID, 10)
+	if err != nil {
+		log.Printf("Error fetching transaction details for !request: %v", err)
+	}
+
+	if !(unpaidTotal > totalDebtAmount-0.01 && unpaidTotal < totalDebtAmount+0.01) {
+		log.Printf("Data Inconsistency Alert: Unpaid transactions sum (%.2f) does not match user_debts amount (%.2f) for debtor %d -> creditor %d. Sending QR for total debt without TxIDs.", unpaidTotal, totalDebtAmount, debtorDbID, creditorDbID)
+		description := fmt.Sprintf("คำร้องขอชำระหนี้คงค้างจาก <@%s> (ยอดรวม)", creditorDiscordID)
+		generateAndSendQrCode(s, m.ChannelID, creditorPromptPayID, totalDebtAmount, debtorDiscordID, description, nil)
+		return
+	}
+
 	description := fmt.Sprintf("คำร้องขอชำระหนี้คงค้างจาก <@%s>", creditorDiscordID)
-	generateAndSendQrCode(s, m.ChannelID, creditorPromptPayID, debtAmount, debtorDiscordID, description, 0)
+	if unpaidTxDetails != "" {
+		maxDescLen := 1500
+		detailsHeader := "\nประกอบด้วยรายการ (TxIDs):\n"
+		availableSpace := maxDescLen - len(description) - len(detailsHeader) - 50
+		if len(unpaidTxDetails) > availableSpace && availableSpace > 0 {
+			unpaidTxDetails = unpaidTxDetails[:availableSpace] + "...\n(และรายการอื่นๆ)"
+		} else if availableSpace <= 0 {
+			unpaidTxDetails = "(แสดงรายการไม่ได้เนื่องจากข้อความยาวเกินไป)"
+		}
+		description += detailsHeader + unpaidTxDetails
+	}
+
+	generateAndSendQrCode(s, m.ChannelID, creditorPromptPayID, totalDebtAmount, debtorDiscordID, description, unpaidTxIDs)
+}
+
+// Helper to get unpaid transaction details string AND slice of IDs AND total amount
+func getUnpaidTransactionIDsAndDetails(debtorDbID, creditorDbID int, detailLimit int) ([]int, string, float64, error) {
+	query := `
+        SELECT id, amount, description
+        FROM transactions
+        WHERE payer_id = $1 AND payee_id = $2 AND already_paid = false
+        ORDER BY created_at ASC;
+    `
+	rows, err := dbPool.Query(context.Background(), query, debtorDbID, creditorDbID)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	defer rows.Close()
+
+	var details strings.Builder
+	var txIDs []int
+	var totalAmount float64
+	count := 0
+	for rows.Next() {
+		var id int
+		var amount float64
+		var description sql.NullString
+		if err := rows.Scan(&id, &amount, &description); err != nil {
+			return nil, "", 0, err
+		}
+		descText := description.String
+		if !description.Valid || descText == "" {
+			descText = "(ไม่มีรายละเอียด)"
+		}
+		if detailLimit <= 0 || count < detailLimit {
+			details.WriteString(fmt.Sprintf("- `%.2f` บาท: %s (TxID: %d)\n", amount, descText, id))
+		} else if count == detailLimit {
+			details.WriteString("- ... (และรายการอื่นๆ)\n")
+		}
+		txIDs = append(txIDs, id)
+		totalAmount += amount
+		count++
+	}
+	if count == 0 {
+		return nil, "", 0, nil
+	}
+	return txIDs, details.String(), totalAmount, nil
 }
 
 func queryAndSendDebts(s *discordgo.Session, m *discordgo.MessageCreate, principalDiscordID string, mode string) {
@@ -616,6 +559,7 @@ func queryAndSendDebts(s *discordgo.Session, m *discordgo.MessageCreate, princip
 		rtd.payee_id,
 		STRING_AGG(rtd.detail_text, '; ' ORDER BY rtd.rn) as details
 	FROM RankedTransactionDetails rtd
+	WHERE rtd.rn <= 5
 	GROUP BY rtd.payer_id, rtd.payee_id
 	`
 	if mode == "debtor" {
@@ -667,9 +611,9 @@ func queryAndSendDebts(s *discordgo.Session, m *discordgo.MessageCreate, princip
 			details = details[:maxDetailLen-3] + "..."
 		}
 		if mode == "debtor" {
-			response.WriteString(fmt.Sprintf("- **%.2f บาท** ให้ <@%s> (รายละเอียด: %s)\n", amount, otherPartyDiscordID, details))
+			response.WriteString(fmt.Sprintf("- **%.2f บาท** ให้ <@%s> (รายละเอียดล่าสุด: %s)\n", amount, otherPartyDiscordID, details))
 		} else {
-			response.WriteString(fmt.Sprintf("- <@%s> เป็นหนี้ **%.2f บาท** (รายละเอียด: %s)\n", otherPartyDiscordID, amount, details))
+			response.WriteString(fmt.Sprintf("- <@%s> เป็นหนี้ **%.2f บาท** (รายละเอียดล่าสุด: %s)\n", otherPartyDiscordID, amount, details))
 		}
 		count++
 	}
@@ -712,45 +656,50 @@ func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 **PaySplitter Bot - วิธีใช้งาน**
 นี่คือคำสั่งที่มีให้ใช้งาน หากต้องการความช่วยเหลือเฉพาะคำสั่ง พิมพ์ ` + "`!help <ชื่อคำสั่ง>`" + `
 
-- ` + "`!bill`" + `: จัดการและหารบิล
-- ` + "`!qr`" + `: สร้าง QR code สำหรับการชำระเงินเฉพาะรายการ
+- ` + "`!bill`" + `: จัดการและหารบิล (รองรับหลายบรรทัด)
+- ` + "`!qr`" + `: สร้าง QR code สำหรับการชำระเงินเฉพาะรายการ (พร้อม TxID)
 - ` + "`!mydebts`" + `: แสดงรายการหนี้สินที่คุณต้องจ่ายให้ผู้อื่น
 - ` + "`!owedtome`" + ` (หรือ ` + "`!mydues`" + `): แสดงรายการที่ผู้อื่นเป็นหนี้คุณ
 - ` + "`!debts @user`" + `: แสดงหนี้สินของ @user ที่ระบุ
 - ` + "`!dues @user`" + `: แสดงรายการที่ผู้อื่นเป็นหนี้ @user ที่ระบุ
 - ` + "`!paid <TxID>`" + `: ทำเครื่องหมายว่าธุรกรรม (TxID) ได้รับการชำระแล้ว
-- ` + "`!request @user <PromptPayID>`" + `: สร้าง QR code เพื่อร้องขอให้ @user ชำระหนี้คงค้างให้คุณ
+- ` + "`!request @user <PromptPayID>`" + `: สร้าง QR code เพื่อร้องขอให้ @user ชำระหนี้คงค้างทั้งหมดให้คุณ (จะลิสต์ TxIDs ที่เกี่ยวข้อง)
 - ` + "`!help`" + `: แสดงข้อความช่วยเหลือนี้ หรือความช่วยเหลือสำหรับคำสั่งเฉพาะ
 
 **การยืนยันสลิปอัตโนมัติ:**
-ตอบกลับข้อความ QR code จากบอทนี้พร้อมแนบรูปภาพสลิปการชำระเงินของคุณ เพื่อยืนยันและทำเครื่องหมายการชำระเงินโดยอัตโนมัติ
+ตอบกลับข้อความ QR code จากบอทนี้พร้อมแนบรูปภาพสลิปการชำระเงินของคุณ เพื่อยืนยันและทำเครื่องหมายการชำระเงินโดยอัตโนมัติ (หากข้อความ QR มี TxID(s) จะพยายามเคลียร์รายการเหล่านั้นก่อน ถ้าไม่มี TxID หรือเคลียร์ TxID ไม่สำเร็จ จะลดหนี้สินรวม)
 `
 
 	billHelp := `
 **คำสั่ง ` + "`!bill`" + ` - วิธีใช้งาน**
 
-1.  **บิลรายการเดียว / หารค่าใช้จ่าย:**
-    ` + "`!bill <จำนวนเงิน> for <รายละเอียด> with @user1 @user2... [YourPromptPayID]`" + `
-    - หาร ` + "`<จำนวนเงิน>`" + ` เท่าๆ กันระหว่างผู้ใช้ที่กล่าวถึง สำหรับ ` + "`<รายละเอียด>`" + ` ที่ระบุ
-    - ` + "`[YourPromptPayID]`" + ` (หมายเลขพร้อมเพย์ของคุณ) ไม่จำเป็นต้องใส่ หากใส่ จะมีการสร้าง QR code ให้แต่ละคน
-    - ตัวอย่าง (พร้อม QR): ` + "`!bill 300 for ค่าตั๋วหนัง with @Alice @Bob 0812345678`" + `
-    - ตัวอย่าง (ไม่มี QR, แค่บันทึกหนี้): ` + "`!bill 150 for ค่าอาหารกลางวัน with @Charlie`" + `
+ใช้สำหรับบันทึกค่าใช้จ่ายและหารหนี้สิน สามารถใส่ได้หลายรายการในคำสั่งเดียวโดยขึ้นบรรทัดใหม่
 
-2.  **บิลหลายรายการ:**
-    a. เริ่มบิล: ` + "`!bill start [YourPromptPayID]`" + `
-       - ` + "`[YourPromptPayID]`" + ` ไม่จำเป็นต้องใส่ หากต้องการสร้าง QR code
-       - บอทจะตอบกลับพร้อมข้อความยืนยัน
-    b. เพิ่มรายการ: ตอบกลับข้อความยืนยันของบอทด้วยรูปแบบ:
-       ` + "`<จำนวนเงิน> for <รายละเอียดรายการ> with @user1 @user2...`" + `
-       - ตัวอย่างการตอบกลับเพื่อเพิ่มรายการ: ` + "`100 for ค่าพิซซ่า with @Alice @Bob`" + `
-       - เพิ่มได้หลายรายการตามต้องการ
-    c. สิ้นสุดบิล: ` + "`!bill finish`" + ` (หรือตอบกลับ ` + "`!bill finish`" + ` ที่ข้อความเริ่มบิลของบอท)
-       - บอทจะสรุปรายการ คำนวณหนี้สินทั้งหมด และส่ง QR code หากมีการระบุ PromptPayID ไว้
+**รูปแบบ:**
+` + "```" + `
+!bill [YourOptionalPromptPayID]
+<จำนวนเงิน1> for <รายละเอียด1> with @userA @userB...
+<จำนวนเงิน2> for <รายละเอียด2> with @userC @userA...
+<จำนวนเงิน3> for <รายละเอียด3> with @userB...
+` + "```" + `
+- บรรทัดแรก: ` + "`!bill`" + ` ตามด้วย PromptPay ID ของคุณ (ไม่จำเป็น) หากใส่ จะมีการสร้าง QR code (พร้อม TxIDs) ให้แต่ละคนที่ติดหนี้คุณจากบิลนี้
+- บรรทัดถัดๆ ไป: แต่ละบรรทัดคือรายการค่าใช้จ่าย โดยใช้รูปแบบ ` + "`<จำนวนเงิน> for <รายละเอียด> with @user1 @user2...`" + `
+- บอทจะคำนวณยอดรวมที่แต่ละคนต้องจ่ายจากทุกรายการในคำสั่งนี้ แล้วบันทึก transaction แยกสำหรับแต่ละรายการ และอัปเดตยอดหนี้รวมใน ` + "`user_debts`" + `
+
+**ตัวอย่าง:**
+` + "```" + `
+!bill 0812345678
+100 for ค่ากาแฟ with @Bob @Alice
+350 for ค่าอาหารเที่ยง with @Alice @Charlie @Bob
+50 for ค่าขนม with @Bob
+` + "```" + `
+บอทจะสรุปยอดที่ Bob, Alice, และ Charlie ต้องจ่ายให้คุณ แล้วส่ง QR code (พร้อม TxIDs ของแต่ละรายการที่เกี่ยวข้อง) ให้แต่ละคน
 `
+
 	qrHelp := `
 **คำสั่ง ` + "`!qr`" + ` - วิธีใช้งาน**
 
-สร้าง QR code สำหรับจำนวนเงินที่ระบุ ให้ผู้ใช้ที่ระบุชำระเงินให้คุณ
+สร้าง QR code สำหรับจำนวนเงินที่ระบุ ให้ผู้ใช้ที่ระบุชำระเงินให้คุณ (พร้อม TxID)
 รูปแบบ: ` + "`!qr <จำนวนเงิน> to @user for <รายละเอียด> <YourPromptPayID>`" + `
 - ` + "`<จำนวนเงิน>`" + `: จำนวนเงินที่ผู้ใช้ต้องชำระ
 - ` + "`@user`" + `: ผู้ใช้ที่ต้องชำระเงินให้คุณ
@@ -758,13 +707,13 @@ func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 - ` + "`<YourPromptPayID>`" + `: หมายเลขพร้อมเพย์ของคุณ (เบอร์โทรศัพท์, เลขบัตรประชาชน, หรือ ewallet-id) สำหรับ QR code (จำเป็นต้องใส่)
 
 ตัวอย่าง: ` + "`!qr 75 to @Eve for หนี้เก่า 0888777666`" + `
-คำสั่งนี้จะบันทึกเป็นหนี้สินจาก @Eve ถึงคุณด้วย
+คำสั่งนี้จะบันทึกเป็นหนี้สินจาก @Eve ถึงคุณด้วย และ QR code จะมี TxID ของรายการนี้
 `
 	debtsHelp := `
 **คำสั่งดูหนี้สิน - วิธีใช้งาน**
 
-- ` + "`!mydebts`" + `: แสดงรายการคนที่คุณเป็นหนี้ และจำนวนเงินทั้งหมดสำหรับแต่ละคน พร้อมรายละเอียดธุรกรรม
-- ` + "`!owedtome`" + ` (หรือ ` + "`!mydues`" + `): แสดงรายการคนที่ติดหนี้คุณ และจำนวนเงินทั้งหมดสำหรับแต่ละคน พร้อมรายละเอียดธุรกรรม
+- ` + "`!mydebts`" + `: แสดงรายการคนที่คุณเป็นหนี้ และจำนวนเงินทั้งหมดสำหรับแต่ละคน พร้อมรายละเอียดธุรกรรมที่ยังไม่ชำระล่าสุด
+- ` + "`!owedtome`" + ` (หรือ ` + "`!mydues`" + `): แสดงรายการคนที่ติดหนี้คุณ และจำนวนเงินทั้งหมดสำหรับแต่ละคน พร้อมรายละเอียดธุรกรรมที่ยังไม่ชำระล่าสุด
 - ` + "`!debts @user`" + `: แสดงว่า ` + "`@user`" + ` ที่ระบุเป็นหนี้ใครบ้าง
 - ` + "`!dues @user`" + `: แสดงว่าใครบ้างที่เป็นหนี้ ` + "`@user`" + ` ที่ระบุ
 
@@ -776,25 +725,27 @@ func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 
 ทำเครื่องหมายธุรกรรมหนึ่งรายการหรือมากกว่าว่าได้รับการชำระแล้ว โดยทั่วไปจะใช้โดยผู้ที่ *ได้รับ* การชำระเงิน
 รูปแบบ: ` + "`!paid <TxID1>[,<TxID2>,...]`" + `
-- ` + "`<TxID>`" + `: หมายเลขธุรกรรมของหนี้สิน สามารถดู TxID ได้จากคำสั่ง ` + "`!mydebts`" + ` หรือ ` + "`!owedtome`" + `
+- ` + "`<TxID>`" + `: หมายเลขธุรกรรมของหนี้สิน สามารถดู TxID ได้จากคำสั่งดูหนี้สินต่างๆ
 - สามารถทำเครื่องหมายหลายธุรกรรมพร้อมกันได้โดยคั่น TxID ด้วยเครื่องหมายจุลภาค (,) โดยไม่มีเว้นวรรค
 
 ตัวอย่าง (รายการเดียว): ` + "`!paid 123`" + `
 ตัวอย่าง (หลายรายการ): ` + "`!paid 123,124,125`" + `
 
 คำสั่งนี้จะอัปเดตสถานะธุรกรรมและปรับปรุงยอดหนี้สินรวมระหว่างผู้ใช้
-อีกทางเลือกหนึ่งสำหรับผู้ชำระเงินคือ การตอบกลับข้อความ QR code ของบอทพร้อมแนบสลิป จะเป็นการพยายามยืนยันและทำเครื่องหมายว่าชำระแล้วโดยอัตโนมัติ
 `
 	requestPaymentHelp := `
 **คำสั่ง ` + "`!request`" + ` - วิธีใช้งาน**
 
-สร้าง QR code เพื่อร้องขอให้ผู้ใช้อื่นชำระหนี้คงค้างทั้งหมดที่เขามีต่อคุณ
+สร้าง QR code เพื่อร้องขอให้ผู้ใช้อื่นชำระหนี้คงค้าง *ทั้งหมด* ที่เขามีต่อคุณ
 รูปแบบ: ` + "`!request @ลูกหนี้ <PromptPayIDของคุณ>`" + `
 - ` + "`@ลูกหนี้`" + `: คือคนที่คุณต้องการร้องขอให้ชำระเงิน
 - ` + "`<PromptPayIDของคุณ>`" + `: คือหมายเลขพร้อมเพย์ *ของคุณ* (ผู้ร้องขอ) เพื่อให้ลูกหนี้ชำระเข้ามา
-- จำนวนเงินจะถูกดึงมาจากยอดหนี้สินปัจจุบันที่ลูกหนี้ค้างคุณโดยอัตโนมัติ
+- จำนวนเงินจะเป็นยอดรวมหนี้สินปัจจุบันทั้งหมดที่ลูกหนี้ค้างคุณโดยอัตโนมัติ
+- ข้อความที่ส่งไปพร้อม QR code จะแสดงรายการ TxID ที่เกี่ยวข้องกับหนี้นั้นๆ ด้วย (ถ้าไม่เยอะเกินไป)
 
-ตัวอย่าง: ` + "`!request @Alice 081xxxxxxx`" + ` (บอทจะสร้าง QR สำหรับยอดหนี้ทั้งหมดที่ @Alice ค้างคุณ โดยใช้พร้อมเพย์ 081xxxxxxx ของคุณ)
+ตัวอย่าง: ` + "`!request @Alice 081xxxxxxx`" + `
+
+*หมายเหตุ: การยืนยันสลิปสำหรับ QR นี้จะพยายามเคลียร์ TxID ทั้งหมดที่เกี่ยวข้อง ถ้าสำเร็จ หรือจะลดหนี้สินรวมหากไม่สามารถเคลียร์ TxID ทั้งหมดได้*
 `
 
 	if len(args) > 1 {
@@ -832,11 +783,12 @@ func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if refMsg.Author == nil || refMsg.Author.ID != s.State.User.ID {
 		return
 	}
-	parsedDebtorDiscordID, parsedAmount, parsedTxID, err := parseBotQRMessageContent(refMsg.Content)
+	parsedDebtorDiscordID, parsedAmount, parsedTxIDs, err := parseBotQRMessageContent(refMsg.Content)
 	if err != nil {
+		log.Printf("SlipVerify: Could not parse bot message content: %v", err)
 		return
 	}
-	log.Printf("SlipVerify: Received slip verification for debtor %s, amount %s, TxID %s", parsedDebtorDiscordID, parsedAmount, parsedTxID)
+	log.Printf("SlipVerify: Received slip verification for debtor %s, amount %.2f, TxIDs %v", parsedDebtorDiscordID, parsedAmount, parsedTxIDs)
 	slipUploaderID := m.Author.ID
 	var slipURL string
 	for _, att := range m.Attachments {
@@ -875,52 +827,76 @@ func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	if parsedTxID > 0 {
-		log.Printf("SlipVerify: Attempting direct update using TxID: %d", parsedTxID)
-		err = markTransactionPaidAndUpdateDebt(parsedTxID)
-		if err == nil {
-			var intendedPayeeDiscordID string
-			payeeDbID, fetchErr := getPayeeDbIdFromTx(parsedTxID)
-			if fetchErr == nil {
-				intendedPayeeDiscordID, _ = getDiscordIdFromDbId(payeeDbID)
-			}
-			if intendedPayeeDiscordID == "" {
-				intendedPayeeDiscordID = "???"
-			}
-
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
-				"✅ สลิปได้รับการยืนยัน & บันทึกการชำระเงินแล้ว (TxID: %d)!\n- ผู้จ่าย: <@%s>\n- ผู้รับ: <@%s>\n- จำนวน: %.2f บาท\n- ผู้ส่ง (สลิป): %s (%s)\n- ผู้รับ (สลิป): %s (%s)\n- วันที่ (สลิป): %s\n- เลขอ้างอิง (สลิป): %s",
-				parsedTxID, parsedDebtorDiscordID, intendedPayeeDiscordID, parsedAmount,
-				verifyResp.Data.SenderName, verifyResp.Data.SenderID,
-				verifyResp.Data.ReceiverName, verifyResp.Data.ReceiverID,
-				verifyResp.Data.Date, verifyResp.Data.Ref,
-			))
+	intendedPayeeDiscordID := "???"
+	if len(parsedTxIDs) > 0 {
+		payeeDbID, fetchErr := getPayeeDbIdFromTx(parsedTxIDs[0])
+		if fetchErr == nil {
+			intendedPayeeDiscordID, _ = getDiscordIdFromDbId(payeeDbID)
+		}
+	} else {
+		payee, findErr := findIntendedPayee(parsedDebtorDiscordID, parsedAmount)
+		if findErr != nil {
+			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("ไม่สามารถระบุผู้รับเงินที่ถูกต้องสำหรับการชำระเงินนี้ได้: %v", findErr))
+			log.Printf("SlipVerify: Could not determine intended payee for debtor %s, amount %.2f: %v", parsedDebtorDiscordID, parsedAmount, findErr)
 			return
 		}
-		log.Printf("SlipVerify: Failed direct update using TxID %d (possibly already paid?): %v. Falling back to general debt reduction.", parsedTxID, err)
+		intendedPayeeDiscordID = payee
 	}
-
-	log.Printf("SlipVerify: No TxID found or direct update failed. Attempting general debt reduction for %s paying amount %.2f.", parsedDebtorDiscordID, parsedAmount)
-	intendedPayeeDiscordID, err := findIntendedPayee(parsedDebtorDiscordID, parsedAmount)
-	if err != nil {
-		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("ไม่สามารถระบุผู้รับเงินที่ถูกต้องสำหรับการชำระเงินนี้ได้: %v", err))
-		log.Printf("SlipVerify: Could not determine intended payee for debtor %s, amount %.2f: %v", parsedDebtorDiscordID, parsedAmount, err)
+	if intendedPayeeDiscordID == "???" || intendedPayeeDiscordID == "" {
+		log.Printf("SlipVerify: Critical - Failed to determine intended payee for debtor %s, amount %.2f", parsedDebtorDiscordID, parsedAmount)
+		sendErrorMessage(s, m.ChannelID, "เกิดข้อผิดพลาดร้ายแรง: ไม่สามารถระบุผู้รับเงินได้")
 		return
 	}
 
-	errReduce := reduceDebtFromPayment(parsedDebtorDiscordID, intendedPayeeDiscordID, parsedAmount)
-	if errReduce != nil {
-		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดในการลดหนี้สินทั่วไปสำหรับ <@%s> ถึง <@%s>: %v", parsedDebtorDiscordID, intendedPayeeDiscordID, errReduce))
-		log.Printf("SlipVerify: Failed general debt reduction for %s to %s (%.2f): %v", parsedDebtorDiscordID, intendedPayeeDiscordID, parsedAmount, errReduce)
+	if len(parsedTxIDs) > 0 {
+		log.Printf("SlipVerify: Attempting batch update using TxIDs: %v", parsedTxIDs)
+		successCount := 0
+		failCount := 0
+		var failMessages []string
+
+		for _, txID := range parsedTxIDs {
+			err = markTransactionPaidAndUpdateDebt(txID)
+			if err == nil {
+				successCount++
+			} else {
+				failCount++
+				failMessages = append(failMessages, fmt.Sprintf("TxID %d (%v)", txID, err))
+				log.Printf("SlipVerify: Failed update for TxID %d: %v", txID, err)
+			}
+		}
+
+		var report strings.Builder
+		report.WriteString(fmt.Sprintf(
+			"✅ สลิปได้รับการยืนยัน!\n- ผู้จ่าย: <@%s>\n- ผู้รับ: <@%s>\n- จำนวน: %.2f บาท\n- ผู้ส่ง (สลิป): %s (%s)\n- ผู้รับ (สลิป): %s (%s)\n- วันที่ (สลิป): %s\n- เลขอ้างอิง (สลิป): %s\n",
+			parsedDebtorDiscordID, intendedPayeeDiscordID, parsedAmount,
+			verifyResp.Data.SenderName, verifyResp.Data.SenderID,
+			verifyResp.Data.ReceiverName, verifyResp.Data.ReceiverID,
+			verifyResp.Data.Date, verifyResp.Data.Ref,
+		))
+		report.WriteString(fmt.Sprintf("อัปเดตสำเร็จ %d/%d รายการธุรกรรม (TxIDs: %v)\n", successCount, len(parsedTxIDs), parsedTxIDs))
+		if failCount > 0 {
+			report.WriteString(fmt.Sprintf("⚠️ เกิดข้อผิดพลาด %d รายการ: %s", failCount, strings.Join(failMessages, "; ")))
+		}
+		s.ChannelMessageSend(m.ChannelID, report.String())
 		return
+
+	} else {
+		log.Printf("SlipVerify: No TxIDs found in message. Attempting general debt reduction for %s paying %s amount %.2f.", parsedDebtorDiscordID, intendedPayeeDiscordID, parsedAmount)
+
+		errReduce := reduceDebtFromPayment(parsedDebtorDiscordID, intendedPayeeDiscordID, parsedAmount)
+		if errReduce != nil {
+			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดในการลดหนี้สินทั่วไปสำหรับ <@%s> ถึง <@%s>: %v", parsedDebtorDiscordID, intendedPayeeDiscordID, errReduce))
+			log.Printf("SlipVerify: Failed general debt reduction for %s to %s (%.2f): %v", parsedDebtorDiscordID, intendedPayeeDiscordID, parsedAmount, errReduce)
+			return
+		}
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
+			"✅ สลิปได้รับการยืนยัน & ยอดหนี้สินจาก <@%s> ถึง <@%s> ลดลง %.2f บาท!\n- ผู้ส่ง (สลิป): %s (%s)\n- ผู้รับ (สลิป): %s (%s)\n- วันที่ (สลิป): %s\n- เลขอ้างอิง (สลิป): %s",
+			parsedDebtorDiscordID, intendedPayeeDiscordID, parsedAmount,
+			verifyResp.Data.SenderName, verifyResp.Data.SenderID,
+			verifyResp.Data.ReceiverName, verifyResp.Data.ReceiverID,
+			verifyResp.Data.Date, verifyResp.Data.Ref,
+		))
 	}
-	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
-		"✅ สลิปได้รับการยืนยัน & ยอดหนี้สินจาก <@%s> ถึง <@%s> ลดลง %.2f บาท!\n- ผู้ส่ง (สลิป): %s (%s)\n- ผู้รับ (สลิป): %s (%s)\n- วันที่ (สลิป): %s\n- เลขอ้างอิง (สลิป): %s",
-		parsedDebtorDiscordID, intendedPayeeDiscordID, parsedAmount,
-		verifyResp.Data.SenderName, verifyResp.Data.SenderID,
-		verifyResp.Data.ReceiverName, verifyResp.Data.ReceiverID,
-		verifyResp.Data.Date, verifyResp.Data.Ref,
-	))
 }
 
 func getPayeeDbIdFromTx(txID int) (int, error) {
@@ -1059,31 +1035,48 @@ func reduceDebtFromPayment(debtorDiscordID, payeeDiscordID string, amount float6
 	return nil
 }
 
-func parseBotQRMessageContent(content string) (debtorDiscordID string, amount float64, txID int, err error) {
+func parseBotQRMessageContent(content string) (debtorDiscordID string, amount float64, txIDs []int, err error) {
 	re := regexp.MustCompile(`<@!?(\d+)> กรุณาชำระ ([\d.]+) บาท`)
 	matches := re.FindStringSubmatch(content)
 	if len(matches) < 3 {
-		return "", 0, 0, fmt.Errorf("เนื้อหาข้อความไม่ตรงกับรูปแบบข้อความ QR ของบอท")
+		return "", 0, nil, fmt.Errorf("เนื้อหาข้อความไม่ตรงกับรูปแบบข้อความ QR ของบอท (ไม่พบ debtor/amount)")
 	}
 
 	debtorDiscordID = matches[1]
 	parsedAmount, parseErr := strconv.ParseFloat(matches[2], 64)
 	if parseErr != nil {
-		return "", 0, 0, fmt.Errorf("ไม่สามารถแยกวิเคราะห์จำนวนเงินจากข้อความ QR ของบอท: %v", parseErr)
+		return "", 0, nil, fmt.Errorf("ไม่สามารถแยกวิเคราะห์จำนวนเงินจากข้อความ QR ของบอท: %v", parseErr)
 	}
 	amount = parsedAmount
 
-	txMatch := txIDRegex.FindStringSubmatch(content)
-	if len(txMatch) == 2 {
-		parsedTxID, txErr := strconv.Atoi(txMatch[1])
-		if txErr == nil {
-			txID = parsedTxID
-		} else {
-			log.Printf("Warning: Failed to parse TxID '%s' from QR message: %v", txMatch[1], txErr)
+	txsMatch := txIDsRegex.FindStringSubmatch(content)
+	if len(txsMatch) == 2 {
+		idStrings := strings.Split(txsMatch[1], ",")
+		txIDs = make([]int, 0, len(idStrings))
+		for _, idStr := range idStrings {
+			trimmedIDStr := strings.TrimSpace(idStr)
+			if parsedTxID, txErr := strconv.Atoi(trimmedIDStr); txErr == nil {
+				txIDs = append(txIDs, parsedTxID)
+			} else {
+				log.Printf("Warning: Failed to parse TxID '%s' from multi-ID list: %v", trimmedIDStr, txErr)
+			}
+		}
+		if len(txIDs) > 0 {
+			return debtorDiscordID, amount, txIDs, nil
 		}
 	}
 
-	return debtorDiscordID, amount, txID, nil
+	txMatch := txIDRegex.FindStringSubmatch(content)
+	if len(txMatch) == 2 {
+		if parsedTxID, txErr := strconv.Atoi(txMatch[1]); txErr == nil {
+			txIDs = []int{parsedTxID}
+			return debtorDiscordID, amount, txIDs, nil
+		} else {
+			log.Printf("Warning: Failed to parse single TxID '%s': %v", txMatch[1], txErr)
+		}
+	}
+
+	return debtorDiscordID, amount, nil, nil
 }
 
 func DiscordConnect() (err error) {
@@ -1284,7 +1277,11 @@ func markTransactionPaidAndUpdateDebt(txID int) error {
 		`SELECT payer_id, payee_id, amount FROM transactions WHERE id = $1 AND already_paid = false FOR UPDATE`, txID,
 	).Scan(&payerDbID, &payeeDbID, &amount)
 	if err != nil {
-		return fmt.Errorf("failed to retrieve transaction %d or it's already paid: %w", txID, err)
+		if err.Error() == "no rows in result set" {
+			log.Printf("TxID %d already paid or does not exist.", txID)
+			return fmt.Errorf("TxID %d ไม่พบ หรือถูกชำระไปแล้ว", txID)
+		}
+		return fmt.Errorf("failed to retrieve unpaid transaction %d: %w", txID, err)
 	}
 
 	_, err = tx.Exec(context.Background(), `UPDATE transactions SET already_paid = TRUE WHERE id = $1`, txID)
@@ -1297,7 +1294,7 @@ func markTransactionPaidAndUpdateDebt(txID int) error {
 WHERE debtor_id = $2 AND creditor_id = $3`,
 		amount, payerDbID, payeeDbID)
 	if err != nil {
-		log.Printf("Warning/Error updating user_debts for txID %d (debtor %d, creditor %d, amount %.2f): %v. This might be okay if debt was already < 0.", txID, payerDbID, payeeDbID, amount, err)
+		log.Printf("Warning/Error updating user_debts for txID %d (debtor %d, creditor %d, amount %.2f): %v. This might be okay if debt was already cleared.", txID, payerDbID, payeeDbID, amount, err)
 	}
 
 	if err = tx.Commit(context.Background()); err != nil {

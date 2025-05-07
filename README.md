@@ -4,13 +4,13 @@ A Discord bot for managing bill splitting, expense tracking, and debt settlement
 
 ## Features
 
-- **Bill Splitting:** Split expenses equally among multiple users
-- **QR Code Generation:** Generate PromptPay QR codes for payments
-- **Payment Verification:** Verify payment slips automatically
-- **Debt Tracking:** Track debts between users
-- **Transaction History:** View transaction history by payer or payee
-- **Debt Settlement:** Mark transactions as paid and update debts
-- **Multi-Item Bills:** Manage bills with multiple items interactively
+- **Bill Splitting:** Split expenses equally among multiple users.
+- **QR Code Generation:** Generate PromptPay QR codes for payments.
+- **Debt Tracking:** Track debts between users.
+- **Transaction History:** View transaction history by payer or payee.
+- **Debt Settlement:** Mark transactions as paid and update debts.
+- **Multi-Item Bills:** Manage bills with multiple items interactively.
+- **Slip Verification:** Automatically verify payment slips and update debts.
 
 ## Prerequisites
 
@@ -87,12 +87,13 @@ docker run -d --name billing-bot --network host -v $(pwd)/config.yaml:/config.ya
 
 ### Bill Management
 
-- **!bill start [PromptPayID]**: Start a multi-item bill. Optionally specify a PromptPay ID for QR code generation.
-- **!bill finish**: Finish the current bill and calculate debts.
-- **!bill <amount> for <description> with @user1 @user2... [PromptPayID]**: Create a single-line bill and split the amount among mentioned users.
-
-### QR Code Generation
-
+- **!bill [PromptPayID]**: Create a multi-item bill. Optionally specify a PromptPay ID for QR code generation.
+  - Example:
+    ```text
+    !bill 0812345678
+    100 for coffee with @Alice @Bob
+    200 for lunch with @Charlie @Alice
+    ```
 - **!qr <amount> to @user for <description> <PromptPayID>**: Generate a QR code for a specific payment.
 
 ### Debt Tracking
@@ -127,9 +128,9 @@ The bot supports automatic slip verification for payments:
 ## Database Schema
 
 The application uses three main tables:
-- **users**: Stores Discord user IDs
-- **transactions**: Records all billing transactions
-- **user_debts**: Tracks current debt balances between users
+- **users**: Stores Discord user IDs.
+- **transactions**: Records all billing transactions.
+- **user_debts**: Tracks current debt balances between users.
 
 ## Development
 
