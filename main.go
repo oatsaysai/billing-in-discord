@@ -388,6 +388,7 @@ func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if err != nil {
 		return
 	}
+
 	// Only process if the reply contains an image
 	var slipURL string
 	for _, att := range m.Attachments {
@@ -423,7 +424,7 @@ func handleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	// Find matching transaction
-	txID, err := findMatchingTransaction(payerDiscordID, m.Author.ID, amount)
+	txID, err := findMatchingTransaction(payerDiscordID, refMsg.Author.ID, amount)
 	if err != nil {
 		s.ChannelMessageSend(m.ChannelID, "No matching transaction found for this slip.")
 		return
