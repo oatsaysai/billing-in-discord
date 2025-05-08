@@ -160,6 +160,16 @@ func migrateDatabase() {
 		log.Fatalf("Failed to apply trigger to firebase_sites: %v", err)
 	}
 
+	// paid_at to transactions table
+	addPaidAt := `
+		ALTER TABLE transactions
+		ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ DEFAULT NULL; -- Added paid_at column
+	`
+	_, err = dbPool.Exec(context.Background(), addPaidAt)
+	if err != nil {
+		log.Fatalf("Failed to add paid_at column to transactions table: %v", err)
+	}
+
 	log.Println("Database migration completed successfully")
 }
 
