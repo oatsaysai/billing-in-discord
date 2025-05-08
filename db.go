@@ -62,6 +62,16 @@ func migrateDatabase() {
 		log.Fatalf("Failed to migrate users table: %v", err)
 	}
 
+	// Add created_at column to users table if it doesn't exist
+	addCreatedAt := `
+		ALTER TABLE users
+		ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+	`
+	_, err = dbPool.Exec(context.Background(), addCreatedAt)
+	if err != nil {
+		log.Fatalf("Failed to add created_at column to users table: %v", err)
+	}
+
 	// Schema for transactions table
 	transactionsSchema := `
     CREATE TABLE IF NOT EXISTS transactions (
@@ -83,6 +93,16 @@ func migrateDatabase() {
 		log.Fatalf("Failed to migrate transactions table: %v", err)
 	}
 
+	// Add paid_at column to transactions table if it doesn't exist
+	addPaidAt := `
+		ALTER TABLE transactions
+		ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ DEFAULT NULL; -- Added paid_at column
+	`
+	_, err = dbPool.Exec(context.Background(), addPaidAt)
+	if err != nil {
+		log.Fatalf("Failed to add paid_at column to transactions table: %v", err)
+	}
+
 	// Schema for user_debts table
 	userDebtsSchema := `
     CREATE TABLE IF NOT EXISTS user_debts (
@@ -100,6 +120,16 @@ func migrateDatabase() {
 	_, err = dbPool.Exec(context.Background(), userDebtsSchema)
 	if err != nil {
 		log.Fatalf("Failed to migrate user_debts table: %v", err)
+	}
+
+	// Add created_at column to user_debts table if they don't exist
+	addCreatedAtUserDebts := `
+		ALTER TABLE user_debts
+		ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+	`
+	_, err = dbPool.Exec(context.Background(), addCreatedAtUserDebts)
+	if err != nil {
+		log.Fatalf("Failed to add created_at column to user_debts table: %v", err)
 	}
 
 	// Schema for firebase_sites table (NEW)
@@ -158,16 +188,6 @@ func migrateDatabase() {
 	_, err = dbPool.Exec(context.Background(), firebaseSitesTrigger)
 	if err != nil {
 		log.Fatalf("Failed to apply trigger to firebase_sites: %v", err)
-	}
-
-	// paid_at to transactions table
-	addPaidAt := `
-		ALTER TABLE transactions
-		ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ DEFAULT NULL; -- Added paid_at column
-	`
-	_, err = dbPool.Exec(context.Background(), addPaidAt)
-	if err != nil {
-		log.Fatalf("Failed to add paid_at column to transactions table: %v", err)
 	}
 
 	log.Println("Database migration completed successfully")
