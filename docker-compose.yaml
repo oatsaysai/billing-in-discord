@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./firebase.json:/app/service-account.json:ro
-      - ./config-prod.yaml:/app/config.yaml:ro
+      - ./config.yaml:/app/config.yaml:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json
       - TZ=Asia/Bangkok
