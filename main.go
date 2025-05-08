@@ -197,7 +197,7 @@ func parseAltBillItem(line string) (amount float64, description string, mentions
 	}
 	amount = amountNum
 	description = parts[1]
-	mentionParts := parts[1:]
+	mentionParts := parts[2:]
 	if len(mentionParts) == 0 {
 		return 0, "", nil, fmt.Errorf("ไม่ได้ระบุผู้ใช้สำหรับรายการ '%s'", description)
 	}
