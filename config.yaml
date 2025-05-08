@@ -9,3 +9,6 @@ PostgreSQL:
   DBName: "billing-db"
   Schema: "public"
   PoolMaxConns: 10
+
+Firebase:
+  MainProjectID: "xxxxx"

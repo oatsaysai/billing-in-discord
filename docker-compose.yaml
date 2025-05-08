@@ -1,0 +1,12 @@
+services:
+  discord-bot:
+    build: .
+    image: image-registry.fintblock.com/billing-bot
+    container_name: billing-bot
+    restart: unless-stopped
+    volumes:
+      - ./firebase.json:/app/service-account.json:ro
+      - ./config-prod.yaml:/app/config.yaml:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json
+      - TZ=Asia/Bangkok

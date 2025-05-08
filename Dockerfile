@@ -25,7 +25,7 @@ RUN apk add --no-cache \
     rm -rf /var/cache/apk/* /tmp/* /root/.npm /usr/lib/node_modules/npm/docs /usr/lib/node_modules/npm/html /usr/lib/node_modules/npm/man /usr/share/man
 
 ENV TZ="Asia/Bangkok"
-ENV PATH /usr/local/bin:/usr/bin:/bin:/sbin:/usr/lib/node_modules/.bin:$PATH
+ENV PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/lib/node_modules/.bin:$PATH
 
 # Create the /app directory
 RUN mkdir -p /app
