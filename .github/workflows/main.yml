@@ -22,5 +22,7 @@ jobs:
           port: 22
           script: |
             cd ~/billing-in-discord/
-            echo "Now in billing-in-discord directory"
-            bash ./deploy.sh
+            git pull
+            docker compose build
+            docker compose down
+            docker compose up -d
