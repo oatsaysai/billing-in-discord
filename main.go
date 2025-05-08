@@ -185,6 +185,37 @@ func parseBillItem(line string) (amount float64, description string, mentions []
 	return amount, description, mentions, nil
 }
 
+func parseAltBillItem(line string) (amount float64, description string, mentions []string, err error) {
+	normalizedContent := strings.ToLower(line)
+	parts := strings.Fields(normalizedContent)
+	if len(parts) < 3 {
+		return 0, "", nil, fmt.Errorf("รูปแบบรายการไม่ถูกต้อง โปรดใช้: `<จำนวนเงิน> <รายละเอียด> @user1 @user2...`")
+	}
+	amountNum, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("จำนวนเงินในรายการไม่ถูกต้อง: '%s'", parts[0])
+	}
+	amount = amountNum
+	description = parts[1]
+	mentionParts := parts[1:]
+	if len(mentionParts) == 0 {
+		return 0, "", nil, fmt.Errorf("ไม่ได้ระบุผู้ใช้สำหรับรายการ '%s'", description)
+	}
+	var foundMentions []string
+	for _, p := range mentionParts {
+		if userMentionRegex.MatchString(p) {
+			foundMentions = append(foundMentions, userMentionRegex.FindStringSubmatch(p)[1])
+		} else {
+			return 0, "", nil, fmt.Errorf("การระบุผู้ใช้ไม่ถูกต้อง '%s' ในรายการ '%s'", p, description)
+		}
+	}
+	if len(foundMentions) == 0 {
+		return 0, "", nil, fmt.Errorf("ไม่ได้ระบุผู้ใช้ที่ถูกต้องสำหรับรายการ '%s'", description)
+	}
+	mentions = foundMentions
+	return amount, description, mentions, nil
+}
+
 func sendErrorMessage(s *discordgo.Session, channelID string, message string) {
 	log.Printf("ERROR to user (Channel: %s): %s", channelID, message)
 	_, err := s.ChannelMessageSend(channelID, fmt.Sprintf("⚠️ เกิดข้อผิดพลาด: %s", message))
@@ -315,11 +346,15 @@ func handleBillCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 			continue
 		}
 
-		amount, description, mentions, parseErr := parseBillItem(trimmedLine)
+		// Try parsing as a regular bill item
+		amount, description, mentions, parseErr := parseAltBillItem(trimmedLine)
 		if parseErr != nil {
-			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("บรรทัดที่ %d มีข้อผิดพลาด: %v", lineNum, parseErr))
-			hasErrors = true
-			continue
+			amount, description, mentions, parseErr = parseBillItem(trimmedLine)
+			if parseErr != nil {
+				sendErrorMessage(s, m.ChannelID, fmt.Sprintf("บรรทัดที่ %d มีข้อผิดพลาด: %v", lineNum, parseErr))
+				hasErrors = true
+				continue
+			}
 		}
 
 		totalBillAmount += amount
