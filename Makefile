@@ -1,5 +1,13 @@
+.PHONY: run build start-db stop-db build-docker run-docker clean
+
 run:
-	go run ./
+	go run ./cmd/server
+
+build:
+	go build -o bin/billing-discord ./cmd/server
+
+install:
+	go install ./cmd/server
 
 start-db:
 	./tools/start_db.sh
@@ -19,3 +27,7 @@ run-docker:
 		--name billing-bot \
 		-v $(PWD)/config.yaml:/config.yaml \
 		image-registry.fintblock.com/billing-bot
+
+clean:
+	rm -rf bin/
+	go clean

@@ -7,10 +7,10 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY *.go ./
+COPY . .
 
 ENV GOCACHE=/root/.cache/go-build
-RUN --mount=type=cache,target="/root/.cache/go-build" go build -o /build/app .
+RUN --mount=type=cache,target="/root/.cache/go-build" go build -o /build/app ./cmd/server
 
 # run stage
 FROM alpine:3.21
@@ -33,5 +33,6 @@ WORKDIR /app
 
 # Copy the application binary
 COPY --from=builder /build/app ./app
+COPY config.yaml ./config.yaml
 
 ENTRYPOINT [ "./app" ]

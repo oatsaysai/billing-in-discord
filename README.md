@@ -70,42 +70,57 @@ PostgreSQL:
 ### Running the Bot
 
 ```bash
-go run *.go
+# Using make (recommended)
+make run
+
+# Or directly
+go run ./cmd/server
+```
+
+### Building the Bot
+
+```bash
+# Using make (recommended)
+make build
+
+# The binary will be created in the bin/ directory
 ```
 
 ### Docker Deployment
 
 ```bash
-# Build the Docker image
-docker build -t billing-in-discord .
+# Using make (recommended)
+make build-docker
+make run-docker
 
-# Run the container
-docker run -d --name billing-bot --network host -v $(pwd)/config.yaml:/config.yaml billing-in-discord
+# Or directly
+docker build -t billing-in-discord .
+docker run -d --name billing-bot -v $(pwd)/config.yaml:/config.yaml billing-in-discord
 ```
 
 ## Bot Commands
 
 ### Bill Management
 
-- **!bill [PromptPayID]**: Create a multi-item bill. Optionally specify a PromptPay ID for QR code generation.
+- **`!bill [PromptPayID]`**: Create a multi-item bill. Optionally specify a PromptPay ID for QR code generation.
   - Example:
     ```text
     !bill 0812345678
     100 for coffee with @Alice @Bob
     200 for lunch with @Charlie @Alice
     ```
-- **!qr <amount> to @user for <description> <PromptPayID>**: Generate a QR code for a specific payment.
+- **`!qr <amount> to @user for <description> <PromptPayID>`**: Generate a QR code for a specific payment.
 
 ### Debt Tracking
 
-- **!mydebts**: Show debts you owe to others.
-- **!owedtome** or **!mydues**: Show debts others owe to you.
-- **!debts @user**: Show debts of a specific user.
-- **!dues @user**: Show dues owed to a specific user.
+- **`!mydebts`**: Show debts you owe to others.
+- **`!owedtome`** or **`!mydues`**: Show debts others owe to you.
+- **`!debts @user`**: Show debts of a specific user.
+- **`!dues @user`**: Show dues owed to a specific user.
 
 ### Payment Management
 
-- **!paid <TxID1>,<TxID2>,...**: Mark transactions as paid and update debts.
+- **`!paid <TxID1>,<TxID2>,...`**: Mark transactions as paid and update debts.
 
 ### Slip Verification
 
@@ -115,8 +130,8 @@ docker run -d --name billing-bot --network host -v $(pwd)/config.yaml:/config.ya
 
 ### Help
 
-- **!help**: Display the list of available commands.
-- **!help <command>**: Get detailed help for a specific command.
+- **`!help`**: Display the list of available commands.
+- **`!help <command>`**: Get detailed help for a specific command.
 
 ## Payment Verification
 
@@ -136,7 +151,24 @@ The application uses three main tables:
 
 ### Database Migration
 
-Database tables are automatically created when the application starts. See `db.go` for the schema details.
+Database tables are automatically created when the application starts. See `internal/db/db.go` for the schema details.
+
+### Project Structure
+
+The project follows the standard Go project layout:
+
+- `cmd/server/`: Contains the main application entry point
+- `internal/`: Contains packages that are not intended to be imported by other applications
+  - `config/`: Configuration management
+  - `db/`: Database operations and migrations
+  - `discord/`: Discord bot and command handlers
+  - `models/`: Data models and types
+  - `utils/`: Utility functions
+- `pkg/`: Contains packages that can be imported by other applications
+  - `firebase/`: Firebase client
+  - `ocr/`: OCR utilities for slip verification
+  - `qrcode/`: QR code generation utilities
+- `tools/`: Utility scripts for development
 
 ## Stopping the Bot
 
