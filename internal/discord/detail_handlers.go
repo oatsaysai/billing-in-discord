@@ -151,17 +151,6 @@ func handleViewDetailButton(s *discordgo.Session, i *discordgo.InteractionCreate
 		})
 	}
 
-	// Add the Close button to both cases
-	components = append(components, discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
-			discordgo.Button{
-				Label:    "ปิด",
-				Style:    discordgo.DangerButton,
-				CustomID: fmt.Sprintf("%s%s", cancelActionButtonPrefix, targetID),
-			},
-		},
-	})
-
 	// Respond with the details message and buttons
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,

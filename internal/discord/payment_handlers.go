@@ -107,17 +107,6 @@ func handleViewDuesButton(s *discordgo.Session, i *discordgo.InteractionCreate) 
 		}
 	}
 
-	// Add close button
-	components = append(components, discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
-			discordgo.Button{
-				Label:    "ปิด",
-				Style:    discordgo.DangerButton,
-				CustomID: fmt.Sprintf("%s%s", cancelActionButtonPrefix, debtorID),
-			},
-		},
-	})
-
 	// Respond with the details message and buttons
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -367,18 +356,6 @@ func handleConfirmPaymentButton(s *discordgo.Session, i *discordgo.InteractionCr
 	}
 }
 
-// handleCancelActionButton handles the cancellation of an action
-func handleCancelActionButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// This button simply dismisses the message
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "ยกเลิกการดำเนินการแล้ว",
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
-	})
-}
-
 // handleDebtDropdown handles the debt dropdown selection
 func handleDebtDropdown(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Get the selected value from the dropdown
@@ -452,17 +429,6 @@ func handleDebtDropdown(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				},
 			})
 		}
-
-		// Add Close button
-		components = append(components, discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{
-				discordgo.Button{
-					Label:    "ปิด",
-					Style:    discordgo.DangerButton,
-					CustomID: fmt.Sprintf("%stx%d", cancelActionButtonPrefix, txID),
-				},
-			},
-		})
 
 		// Respond with transaction details and buttons
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
