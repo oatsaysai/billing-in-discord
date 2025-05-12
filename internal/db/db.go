@@ -277,6 +277,7 @@ func CreateTransaction(payerID, payeeID int, amount float64, description string)
 type DebtDetail struct {
 	Amount              float64
 	OtherPartyDiscordID string
+	OtherPartyName      string
 	Details             string
 }
 
@@ -339,6 +340,10 @@ func GetUserDebtsWithDetails(userID int, isDebtor bool) ([]DebtDetail, error) {
 		if err := rows.Scan(&debt.Amount, &debt.OtherPartyDiscordID, &debt.Details); err != nil {
 			return nil, fmt.Errorf("error scanning debt/due with details row: %w", err)
 		}
+
+		// อัตโนมัติตั้งชื่อเริ่มต้นเป็นค่าว่าง ชื่อจริงจะถูกตั้งตอนดึงจาก Discord
+		debt.OtherPartyName = ""
+
 		results = append(results, debt)
 	}
 

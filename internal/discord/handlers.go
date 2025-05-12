@@ -49,6 +49,9 @@ func Initialize(token string) error {
 	// Register handlers
 	session.AddHandler(messageHandler)
 
+	// Register component handlers for interactive UI
+	RegisterComponentHandlers(session)
+
 	// Open connection to Discord
 	err = session.Open()
 	if err != nil {
@@ -93,8 +96,12 @@ func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		go handleQrCommand(s, m)
 	case command == "!mydebts":
 		go handleMyDebts(s, m)
+	case command == "!imydebts":
+		go HandleInteractiveMyDebts(s, m)
 	case command == "!owedtome", command == "!mydues":
 		go handleOwedToMe(s, m)
+	case command == "!imydues", command == "!iowedtome":
+		go HandleInteractiveOwedToMe(s, m)
 	case command == "!debts" && len(args) > 1 && userMentionRegex.MatchString(args[1]):
 		go handleDebtsOfUser(s, m, args[1:])
 	case command == "!dues" && len(args) > 1 && userMentionRegex.MatchString(args[1]):
@@ -103,6 +110,10 @@ func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		go updatePaidStatus(s, m)
 	case command == "!request":
 		go handleRequestPayment(s, m)
+	case command == "!irequest":
+		go HandleInteractiveRequestPayment(s, m)
+	case command == "!selecttx":
+		go HandleSelectTransaction(s, m)
 	case command == "!setpromptpay":
 		go handleSetPromptPayCommand(s, m)
 	case command == "!mypromptpay":
@@ -606,12 +617,15 @@ func queryAndSendDebts(s *discordgo.Session, m *discordgo.MessageCreate, princip
 		return
 	}
 
+	// ดึงชื่อผู้ใช้จริงจาก Discord
+	principalName := GetDiscordUsername(s, principalDiscordID)
+
 	// Format the title based on the mode
 	var title string
 	if isDebtor {
-		title = fmt.Sprintf("หนี้สินของ <@%s> (ที่ต้องจ่ายคนอื่น):\n", principalDiscordID)
+		title = fmt.Sprintf("หนี้สินของ %s (<@%s>) (ที่ต้องจ่ายคนอื่น):\n", principalName, principalDiscordID)
 	} else {
-		title = fmt.Sprintf("ยอดค้างชำระถึง <@%s> (ที่คนอื่นต้องจ่าย):\n", principalDiscordID)
+		title = fmt.Sprintf("ยอดค้างชำระถึง %s (<@%s>) (ที่คนอื่นต้องจ่าย):\n", principalName, principalDiscordID)
 	}
 
 	// Build the response
@@ -621,13 +635,16 @@ func queryAndSendDebts(s *discordgo.Session, m *discordgo.MessageCreate, princip
 	// Handle case with no debts
 	if len(debts) == 0 {
 		if isDebtor {
-			response.WriteString(fmt.Sprintf("<@%s> ไม่มีหนี้สินค้างชำระ! 🎉\n", principalDiscordID))
+			response.WriteString(fmt.Sprintf("%s ไม่มีหนี้สินค้างชำระ! 🎉\n", principalName))
 		} else {
-			response.WriteString(fmt.Sprintf("ดูเหมือนว่าทุกคนจะชำระหนี้ให้ <@%s> หมดแล้ว 👍\n", principalDiscordID))
+			response.WriteString(fmt.Sprintf("ดูเหมือนว่าทุกคนจะชำระหนี้ให้ %s หมดแล้ว 👍\n", principalName))
 		}
 	} else {
 		// Format each debt with its details
 		for _, debt := range debts {
+			// ดึงชื่อผู้ใช้จริงของฝั่งตรงข้าม
+			otherPartyName := GetDiscordUsername(s, debt.OtherPartyDiscordID)
+
 			// Truncate details if too long
 			details := debt.Details
 			maxDetailLen := 150 // Max length for details string in the summary
@@ -637,11 +654,11 @@ func queryAndSendDebts(s *discordgo.Session, m *discordgo.MessageCreate, princip
 
 			// Format based on the mode
 			if isDebtor {
-				response.WriteString(fmt.Sprintf("- **%.2f บาท** ให้ <@%s> (รายละเอียดล่าสุด: %s)\n",
-					debt.Amount, debt.OtherPartyDiscordID, details))
+				response.WriteString(fmt.Sprintf("- **%.2f บาท** ให้ %s (<@%s>) (รายละเอียดล่าสุด: %s)\n",
+					debt.Amount, otherPartyName, debt.OtherPartyDiscordID, details))
 			} else {
-				response.WriteString(fmt.Sprintf("- <@%s> เป็นหนี้ **%.2f บาท** (รายละเอียดล่าสุด: %s)\n",
-					debt.OtherPartyDiscordID, debt.Amount, details))
+				response.WriteString(fmt.Sprintf("- %s (<@%s>) เป็นหนี้ **%.2f บาท** (รายละเอียดล่าสุด: %s)\n",
+					otherPartyName, debt.OtherPartyDiscordID, debt.Amount, details))
 			}
 		}
 	}
@@ -980,6 +997,12 @@ func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 - ` + "`!dues @user`" + ` - ดูยอดเงินที่ผู้อื่นเป็นหนี้ผู้ใช้รายนั้น
 - ` + "`!request @user [promptpay_id]`" + ` - ส่งคำขอชำระเงินไปยังผู้ใช้
 - ` + "`!paid <txID>`" + ` - ทำเครื่องหมายว่ารายการชำระแล้ว (ต้องเป็นผู้รับเงินเท่านั้น)
+
+**คำสั่ง Interactive UI:**
+- ` + "`!imydebts`" + ` - แสดงยอดหนี้พร้อมปุ่มชำระเงินและดูรายละเอียด
+- ` + "`!imydues`" + ` (หรือ ` + "`!iowedtome`" + `) - แสดงยอดเงินที่คนอื่นค้างชำระพร้อมปุ่มดำเนินการ
+- ` + "`!selecttx [unpaid|paid|due]`" + ` - เลือกดูรายการธุรกรรมผ่านเมนูเลือก
+- ` + "`!irequest @user`" + ` - ส่งคำขอชำระเงินแบบอินเตอร์แอคทีฟ
 
 **คำสั่งจัดการ PromptPay ID:**
 - ` + "`!setpromptpay <promptpay_id>`" + ` - ตั้งค่า PromptPay ID ของคุณ
