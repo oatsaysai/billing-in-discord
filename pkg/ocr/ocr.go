@@ -3,13 +3,14 @@ package ocr
 import (
 	"bytes"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -21,16 +22,13 @@ type Client struct {
 
 // ExtractBillTextResponse represents the response from the bill text extraction API
 type ExtractBillTextResponse struct {
-	Message string `json:"message"`
-	Data    struct {
-		MerchantName  string     `json:"merchant_name"`
-		Datetime      string     `json:"datetime"`
-		Items         []BillItem `json:"items"`
-		SubTotal      float64    `json:"sub_total"`
-		VAT           float64    `json:"vat"`
-		ServiceCharge float64    `json:"service_charge"`
-		Total         float64    `json:"total"`
-	} `json:"data"`
+	MerchantName  string     `json:"merchant_name"`
+	Datetime      string     `json:"datetime"`
+	Items         []BillItem `json:"items"`
+	SubTotal      float64    `json:"sub_total"`
+	VAT           float64    `json:"vat"`
+	ServiceCharge float64    `json:"service_charge"`
+	Total         float64    `json:"total"`
 }
 
 // BillItem represents an individual item in a bill
@@ -78,25 +76,43 @@ func DownloadFile(filepath, url string) error {
 func (c *Client) ExtractBillText(imgPath string) (*ExtractBillTextResponse, error) {
 	log.Printf("ExtractBillText called for image %s", imgPath)
 
-	imgBytes, err := os.ReadFile(imgPath)
+	// Open the file
+	file, err := os.Open(imgPath)
 	if err != nil {
-		return nil, fmt.Errorf("ExtractBillText: failed to read image file: %w", err)
+		return nil, fmt.Errorf("ExtractBillText: failed to open image file: %w", err)
 	}
-	imgBase64 := base64.StdEncoding.EncodeToString(imgBytes)
-	payload := map[string]string{
-		"img": fmt.Sprintf("data:image/png;base64,%s", imgBase64),
-	}
-	jsonData, err := json.Marshal(payload)
+	defer file.Close()
+
+	// Create a new multipart writer
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// Create form file
+	part, err := writer.CreateFormFile("image", filepath.Base(imgPath))
 	if err != nil {
-		return nil, fmt.Errorf("ExtractBillText: failed to marshal JSON: %w", err)
+		return nil, fmt.Errorf("ExtractBillText: failed to create form file: %w", err)
 	}
 
-	// URL for bill text extraction API
-	req, err := http.NewRequest("POST", c.APIURL, bytes.NewBuffer(jsonData))
+	// Copy the file data to the form
+	_, err = io.Copy(part, file)
+	if err != nil {
+		return nil, fmt.Errorf("ExtractBillText: failed to copy image to form: %w", err)
+	}
+
+	// Close the multipart writer
+	err = writer.Close()
+	if err != nil {
+		return nil, fmt.Errorf("ExtractBillText: failed to close multipart writer: %w", err)
+	}
+
+	// Create the request
+	req, err := http.NewRequest("POST", c.APIURL, body)
 	if err != nil {
 		return nil, fmt.Errorf("ExtractBillText: failed to create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+
+	// Set the content type to multipart/form-data
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 	if c.APIKey != "" {
 		req.Header.Set("X-Api-Key", c.APIKey)
 	}
@@ -108,25 +124,27 @@ func (c *Client) ExtractBillText(imgPath string) (*ExtractBillTextResponse, erro
 		},
 		Timeout: 30 * time.Second, // Longer timeout for text extraction
 	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ExtractBillText: failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("ExtractBillText: failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ExtractBillText: API returned status %d. Body: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("ExtractBillText: API returned status %d. Body: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result ExtractBillTextResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("ExtractBillText: failed to unmarshal response: %v, body: %s", err, string(body))
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("ExtractBillText: failed to unmarshal response: %v, body: %s", err, string(respBody))
 	}
-	log.Printf("ExtractBillText successful. Extracted %d items with total %.2f", len(result.Data.Items), result.Data.Total)
+
+	log.Printf("ExtractBillText successful. Extracted %d items with total %.2f", len(result.Items), result.Total)
 	return &result, nil
 }
