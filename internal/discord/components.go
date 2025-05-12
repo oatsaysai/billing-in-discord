@@ -10,9 +10,11 @@ const (
 	// Component Custom IDs
 	payDebtButtonPrefix        = "pay_debt_"
 	viewDetailButtonPrefix     = "view_detail_"
+	requestPaymentButtonPrefix = "request_payment_"
 	markPaidButtonPrefix       = "mark_paid_"
 	confirmPaymentButtonPrefix = "confirm_payment_"
 	cancelActionButtonPrefix   = "cancel_action_"
+	viewDuesButtonPrefix       = "view_dues_"
 	debtDropdownID             = "debt_dropdown"
 )
 
@@ -39,11 +41,15 @@ func handleMessageComponentInteraction(s *discordgo.Session, i *discordgo.Intera
 	case strings.HasPrefix(customID, markPaidButtonPrefix):
 		handleMarkPaidButton(s, i)
 	case strings.HasPrefix(customID, confirmPaymentButtonPrefix):
-		//handleConfirmPaymentButton(s, i)
+		handleConfirmPaymentButton(s, i)
 	case strings.HasPrefix(customID, cancelActionButtonPrefix):
-		//handleCancelActionButton(s, i)
+		handleCancelActionButton(s, i)
+	case strings.HasPrefix(customID, requestPaymentButtonPrefix):
+		handleRequestPaymentButton(s, i)
+	case strings.HasPrefix(customID, viewDuesButtonPrefix):
+		handleViewDuesButton(s, i)
 	case customID == debtDropdownID:
-		//handleDebtDropdown(s, i)
+		handleDebtDropdown(s, i)
 	default:
 		log.Printf("Unknown component interaction: %s", customID)
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
