@@ -135,6 +135,34 @@ func Migrate() {
 		log.Fatalf("Failed to add created_at column to user_debts table: %v", err)
 	}
 
+	// Schema for user_promptpay table
+	userPromptPaySchema := `
+	CREATE TABLE IF NOT EXISTS user_promptpay (
+		user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		promptpay_id VARCHAR(50) NOT NULL,
+		created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (user_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_user_promptpay_user_id ON user_promptpay(user_id);
+	`
+	_, err = Pool.Exec(context.Background(), userPromptPaySchema)
+	if err != nil {
+		log.Fatalf("Failed to migrate user_promptpay table: %v", err)
+	}
+
+	// Apply trigger to user_promptpay
+	userPromptPayTrigger := `
+	DROP TRIGGER IF EXISTS update_user_promptpay_modtime ON user_promptpay;
+	CREATE TRIGGER update_user_promptpay_modtime
+	BEFORE UPDATE ON user_promptpay
+	FOR EACH ROW
+	EXECUTE FUNCTION update_modified_column();`
+	_, err = Pool.Exec(context.Background(), userPromptPayTrigger)
+	if err != nil {
+		log.Fatalf("Failed to apply trigger to user_promptpay: %v", err)
+	}
+
 	// Schema for firebase_sites table (NEW)
 	firebaseSitesSchema := `
 	CREATE TABLE IF NOT EXISTS firebase_sites (
@@ -245,49 +273,77 @@ func CreateTransaction(payerID, payeeID int, amount float64, description string)
 	return txID, nil
 }
 
-// GetUserDebtsOrDues gets all outstanding debts or dues for a user
-func GetUserDebtsOrDues(userID int, isDebtor bool) ([]map[string]interface{}, error) {
+// DebtDetail represents a debt relationship with transaction details
+type DebtDetail struct {
+	Amount              float64
+	OtherPartyDiscordID string
+	Details             string
+}
+
+// GetUserDebtsWithDetails gets all outstanding debts with transaction details for a user
+func GetUserDebtsWithDetails(userID int, isDebtor bool) ([]DebtDetail, error) {
+	// Subquery to get a comma-separated list of recent unpaid transaction details
+	transactionDetailsSubquery := `
+	WITH RankedTransactionDetails AS (
+		SELECT
+			t.payer_id,
+			t.payee_id,
+			t.description || ' (TxID:' || t.id::text || ')' as detail_text,
+			ROW_NUMBER() OVER (PARTITION BY t.payer_id, t.payee_id ORDER BY t.created_at DESC, t.id DESC) as rn
+		FROM transactions t
+		WHERE t.already_paid = false
+	)
+	SELECT
+		rtd.payer_id,
+		rtd.payee_id,
+		STRING_AGG(rtd.detail_text, '; ' ORDER BY rtd.rn) as details
+	FROM RankedTransactionDetails rtd
+	WHERE rtd.rn <= 5 -- Limit to 5 most recent details per pair
+	GROUP BY rtd.payer_id, rtd.payee_id
+	`
+
 	var query string
 	if isDebtor {
-		query = `
-			SELECT ud.amount, u_other.discord_id
+		query = fmt.Sprintf(`
+			SELECT ud.amount, u_other.discord_id AS other_party_discord_id,
+				   COALESCE(tx_details.details, 'หนี้สินรวม ไม่พบรายการธุรกรรมที่ยังไม่ได้ชำระที่เกี่ยวข้อง') as details
 			FROM user_debts ud
 			JOIN users u_other ON ud.creditor_id = u_other.id
+			LEFT JOIN (
+				%s
+			) AS tx_details ON tx_details.payer_id = ud.debtor_id AND tx_details.payee_id = ud.creditor_id
 			WHERE ud.debtor_id = $1 AND ud.amount > 0.009
-			ORDER BY ud.amount DESC
-		`
+			ORDER BY ud.amount DESC;`, transactionDetailsSubquery)
 	} else {
-		query = `
-			SELECT ud.amount, u_other.discord_id
+		query = fmt.Sprintf(`
+			SELECT ud.amount, u_other.discord_id AS other_party_discord_id,
+				   COALESCE(tx_details.details, 'หนี้สินรวม ไม่พบรายการธุรกรรมที่ยังไม่ได้ชำระที่เกี่ยวข้อง') as details
 			FROM user_debts ud
 			JOIN users u_other ON ud.debtor_id = u_other.id
+			LEFT JOIN (
+				%s
+			) AS tx_details ON tx_details.payer_id = ud.debtor_id AND tx_details.payee_id = ud.creditor_id
 			WHERE ud.creditor_id = $1 AND ud.amount > 0.009
-			ORDER BY ud.amount DESC
-		`
+			ORDER BY ud.amount DESC;`, transactionDetailsSubquery)
 	}
 
 	rows, err := Pool.Query(context.Background(), query, userID)
 	if err != nil {
-		return nil, fmt.Errorf("error querying user debts/dues: %w", err)
+		return nil, fmt.Errorf("error querying user debts/dues with details: %w", err)
 	}
 	defer rows.Close()
 
-	var results []map[string]interface{}
+	var results []DebtDetail
 	for rows.Next() {
-		var amount float64
-		var discordID string
-		if err := rows.Scan(&amount, &discordID); err != nil {
-			return nil, fmt.Errorf("error scanning debt/due row: %w", err)
+		var debt DebtDetail
+		if err := rows.Scan(&debt.Amount, &debt.OtherPartyDiscordID, &debt.Details); err != nil {
+			return nil, fmt.Errorf("error scanning debt/due with details row: %w", err)
 		}
-
-		results = append(results, map[string]interface{}{
-			"amount":     amount,
-			"discord_id": discordID,
-		})
+		results = append(results, debt)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating user debts/dues: %w", err)
+		return nil, fmt.Errorf("error iterating user debts/dues with details: %w", err)
 	}
 
 	return results, nil
@@ -302,26 +358,6 @@ func GetTotalDebtAmount(debtorID, creditorID int) (float64, error) {
 		return 0, fmt.Errorf("error getting total debt amount: %w", err)
 	}
 	return totalAmount, nil
-}
-
-// MarkTransactionPaid marks a transaction as paid
-func MarkTransactionPaid(txID int) error {
-	query := `
-		UPDATE transactions 
-		SET already_paid = true, paid_at = CURRENT_TIMESTAMP 
-		WHERE id = $1 AND already_paid = false
-	`
-	result, err := Pool.Exec(context.Background(), query, txID)
-	if err != nil {
-		return fmt.Errorf("failed to mark transaction as paid: %w", err)
-	}
-
-	rowsAffected := result.RowsAffected()
-	if rowsAffected == 0 {
-		return fmt.Errorf("transaction %d not found or already marked as paid", txID)
-	}
-
-	return nil
 }
 
 // GetDiscordIDFromDbID gets a Discord ID from a database user ID

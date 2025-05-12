@@ -103,6 +103,10 @@ func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		go updatePaidStatus(s, m)
 	case command == "!request":
 		go handleRequestPayment(s, m)
+	case command == "!setpromptpay":
+		go handleSetPromptPayCommand(s, m)
+	case command == "!mypromptpay":
+		go handleGetMyPromptPayCommand(s, m)
 	case command == "!upweb":
 		go handleUpWebCommand(s, m)
 	case command == "!downweb":
@@ -186,56 +190,111 @@ func generateAndSendQrCode(s *discordgo.Session, channelID, promptPayNum string,
 // --- Parsing Functions ---
 
 // parseQrArgs parses the arguments for the !qr command
-func parseQrArgs(content string) (amount float64, toUser string, description string, promptPayID string, err error) {
+func parseQrArgs(content string, userDbID int) (amount float64, toUser string, description string, promptPayID string, err error) {
 	normalizedContent := strings.ToLower(content)
 	trimmedContent := strings.TrimSpace(strings.TrimPrefix(normalizedContent, "!qr "))
 	parts := strings.Fields(trimmedContent)
-	if len(parts) < 6 {
-		return 0, "", "", "", fmt.Errorf("รูปแบบ `!qr` ไม่ถูกต้อง โปรดใช้: `!qr <จำนวนเงิน> to @user for <รายละเอียด> <YourPromptPayID>`")
+
+	// Check for minimum required parts (amount, to, @user)
+	if len(parts) < 3 {
+		return 0, "", "", "", fmt.Errorf("รูปแบบ `!qr` ไม่ถูกต้อง โปรดใช้: `!qr <จำนวนเงิน> to @user [for <รายละเอียด>] [<YourPromptPayID>]`")
 	}
+
 	parsedAmount, amountErr := strconv.ParseFloat(parts[0], 64)
 	if amountErr != nil {
 		return 0, "", "", "", fmt.Errorf("จำนวนเงิน '%s' ไม่ถูกต้อง", parts[0])
 	}
 	amount = parsedAmount
+
 	if parts[1] != "to" {
 		return 0, "", "", "", fmt.Errorf("ไม่พบคำว่า 'to'")
 	}
+
 	if !userMentionRegex.MatchString(parts[2]) {
 		return 0, "", "", "", fmt.Errorf("ต้องระบุ @user ที่ถูกต้องหลัง 'to'")
 	}
 	toUser = userMentionRegex.FindStringSubmatch(parts[2])[1]
-	if parts[3] != "for" {
-		return 0, "", "", "", fmt.Errorf("ไม่พบคำว่า 'for'")
+
+	// Check if there are more parts for description/promptPay
+	if len(parts) > 3 {
+		// Initialize with defaults
+		description = ""
+		promptPayID = ""
+
+		// Check if there's a "for" section (description)
+		forIndex := -1
+		for i, p := range parts[3:] {
+			if p == "for" {
+				forIndex = i + 3 // Adjust index to account for original parts array
+				break
+			}
+		}
+
+		if forIndex != -1 {
+			// We have a description section
+
+			// Check the last part to see if it's a potentially valid PromptPay ID
+			lastPart := parts[len(parts)-1]
+			if db.IsValidPromptPayID(lastPart) {
+				// The last part is a PromptPay ID
+				promptPayID = lastPart
+				// Description is everything between "for" and the PromptPay ID
+				description = strings.Join(parts[forIndex+1:len(parts)-1], " ")
+			} else {
+				// No PromptPay ID specified, description is everything after "for"
+				description = strings.Join(parts[forIndex+1:], " ")
+			}
+		} else {
+			// No "for" section, check if last part could be a PromptPay ID
+			lastPart := parts[len(parts)-1]
+			if db.IsValidPromptPayID(lastPart) {
+				promptPayID = lastPart
+			}
+		}
 	}
-	promptPayID = parts[len(parts)-1]
-	if !regexp.MustCompile(`^(\d{10}|\d{13}|ewallet-\d+)$`).MatchString(promptPayID) {
-		return 0, "", "", "", fmt.Errorf("PromptPayID '%s' ไม่ถูกต้องที่ส่วนท้าย", promptPayID)
+
+	// If promptPayID is still empty, try to get it from the database
+	if promptPayID == "" {
+		dbPromptPayID, err := db.GetUserPromptPayID(userDbID)
+		if err != nil {
+			return 0, "", "", "", fmt.Errorf("ไม่พบ PromptPayID ในข้อความและคุณยังไม่ได้ตั้งค่า PromptPayID ส่วนตัว กรุณาระบุ PromptPayID หรือใช้คำสั่ง !setpromptpay ก่อน")
+		}
+		promptPayID = dbPromptPayID
 	}
-	if len(parts)-1 <= 4 {
-		return 0, "", "", "", fmt.Errorf("รายละเอียดห้ามว่าง")
-	}
-	description = strings.Join(parts[4:len(parts)-1], " ")
-	if description == "" {
-		return 0, "", "", "", fmt.Errorf("รายละเอียดห้ามว่าง")
-	}
+
 	return amount, toUser, description, promptPayID, nil
 }
 
 // parseRequestPaymentArgs parses the arguments for the !request command
-func parseRequestPaymentArgs(content string) (debtorDiscordID string, creditorPromptPayID string, err error) {
+func parseRequestPaymentArgs(content string, creditorDbID int) (debtorDiscordID string, creditorPromptPayID string, err error) {
 	parts := strings.Fields(content)
-	if len(parts) != 3 {
-		return "", "", fmt.Errorf("รูปแบบไม่ถูกต้อง โปรดใช้: `!request @ลูกหนี้ <PromptPayIDของคุณ>`")
+
+	// Check basic syntax
+	if len(parts) < 2 {
+		return "", "", fmt.Errorf("รูปแบบไม่ถูกต้อง โปรดใช้: `!request @ลูกหนี้ [PromptPayID]`")
 	}
+
+	// Extract debtor
 	if !userMentionRegex.MatchString(parts[1]) {
 		return "", "", fmt.Errorf("ต้องระบุ @ลูกหนี้ ที่ถูกต้อง")
 	}
 	debtorDiscordID = userMentionRegex.FindStringSubmatch(parts[1])[1]
-	creditorPromptPayID = parts[2]
-	if !regexp.MustCompile(`^(\d{10}|\d{13}|ewallet-\d+)$`).MatchString(creditorPromptPayID) {
-		return "", "", fmt.Errorf("PromptPayID '%s' ของคุณไม่ถูกต้อง", creditorPromptPayID)
+
+	// Extract PromptPay ID if provided
+	if len(parts) > 2 {
+		creditorPromptPayID = parts[2]
+		if !db.IsValidPromptPayID(creditorPromptPayID) {
+			return "", "", fmt.Errorf("PromptPayID '%s' ของคุณไม่ถูกต้อง", creditorPromptPayID)
+		}
+	} else {
+		// Try to get saved PromptPay ID
+		savedPromptPayID, err := db.GetUserPromptPayID(creditorDbID)
+		if err != nil {
+			return "", "", fmt.Errorf("คุณยังไม่ได้ระบุ PromptPayID และยังไม่ได้ตั้งค่า PromptPayID ส่วนตัว กรุณาระบุ PromptPayID หรือใช้คำสั่ง !setpromptpay ก่อน")
+		}
+		creditorPromptPayID = savedPromptPayID
 	}
+
 	return debtorDiscordID, creditorPromptPayID, nil
 }
 
@@ -333,12 +392,15 @@ func handleBillCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		sendErrorMessage(s, m.ChannelID, "บรรทัดแรกต้องขึ้นต้นด้วย `!bill`")
 		return
 	}
+
 	var promptPayID string
 	if len(firstLineParts) > 1 {
-		promptPayID = firstLineParts[1]
-		if !regexp.MustCompile(`^(\d{10}|\d{13}|ewallet-\d+)$`).MatchString(promptPayID) {
-			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("PromptPayID '%s' ในบรรทัดแรกดูเหมือนจะไม่ถูกต้อง จะดำเนินการต่อโดยไม่สร้าง QR", promptPayID))
-			promptPayID = "" // Clear invalid ID
+		// Check if the second part is a valid PromptPay ID
+		if db.IsValidPromptPayID(firstLineParts[1]) {
+			promptPayID = firstLineParts[1]
+		} else {
+			sendErrorMessage(s, m.ChannelID, fmt.Sprintf("PromptPayID '%s' ในบรรทัดแรกดูเหมือนจะไม่ถูกต้อง", firstLineParts[1]))
+			return
 		}
 	}
 
@@ -347,6 +409,18 @@ func handleBillCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if err != nil {
 		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดกับฐานข้อมูลสำหรับคุณ (<@%s>)", payeeDiscordID))
 		return
+	}
+
+	// If promptPayID is not provided in the command, try to get it from the database
+	if promptPayID == "" {
+		dbPromptPayID, err := db.GetUserPromptPayID(payeeDbID)
+		if err != nil {
+			// If there's no promptPayID stored, just notify the user but continue processing
+			log.Printf("No PromptPay ID found for user %s (dbID %d): %v", payeeDiscordID, payeeDbID, err)
+			s.ChannelMessageSend(m.ChannelID, "⚠️ ไม่พบ PromptPay ID ที่บันทึกไว้ จะดำเนินการต่อโดยไม่สร้าง QR Code\nคุณสามารถตั้งค่า PromptPay ID ได้ด้วยคำสั่ง `!setpromptpay <PromptPayID>`")
+		} else {
+			promptPayID = dbPromptPayID
+		}
 	}
 
 	userTotalDebts := make(map[string]float64) // payerDiscordID -> totalOwed
@@ -427,7 +501,11 @@ func handleBillCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		if hasErrors {
 			qrSummary.WriteString("⚠️ *มีข้อผิดพลาดเกิดขึ้นในการประมวลผลบางรายการ โปรดตรวจสอบข้อความก่อนหน้า*\n")
 		}
-		qrSummary.WriteString("\nสร้าง QR Code สำหรับชำระเงิน:\n")
+
+		// Only mention QR codes if we have a PromptPay ID
+		if promptPayID != "" {
+			qrSummary.WriteString("\nสร้าง QR Code สำหรับชำระเงิน:\n")
+		}
 		s.ChannelMessageSend(m.ChannelID, qrSummary.String())
 
 		for payerDiscordID, totalOwed := range userTotalDebts {
@@ -443,17 +521,19 @@ func handleBillCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 // handleQrCommand handles the !qr command
 func handleQrCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	amount, toUserDiscordID, description, promptPayID, err := parseQrArgs(m.Content)
-	if err != nil {
-		sendErrorMessage(s, m.ChannelID, err.Error())
-		return
-	}
 	payeeDiscordID := m.Author.ID // The one creating the QR is the payee
 	payeeDbID, err := db.GetOrCreateUser(payeeDiscordID)
 	if err != nil {
 		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดกับฐานข้อมูลสำหรับคุณ (<@%s>)", payeeDiscordID))
 		return
 	}
+
+	amount, toUserDiscordID, description, promptPayID, err := parseQrArgs(m.Content, payeeDbID)
+	if err != nil {
+		sendErrorMessage(s, m.ChannelID, err.Error())
+		return
+	}
+
 	payerDbID, err := db.GetOrCreateUser(toUserDiscordID)
 	if err != nil {
 		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดกับฐานข้อมูลสำหรับผู้รับ <@%s>", toUserDiscordID))
@@ -516,43 +596,57 @@ func queryAndSendDebts(s *discordgo.Session, m *discordgo.MessageCreate, princip
 		return
 	}
 
-	// Query the database
-	debts, queryErr := db.GetUserDebtsOrDues(principalDbID, mode == "debtor")
-	if queryErr != nil {
+	// Get debts with transaction details from the db package
+	isDebtor := mode == "debtor"
+	debts, err := db.GetUserDebtsWithDetails(principalDbID, isDebtor)
+	if err != nil {
 		sendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลหนี้สินได้")
-		log.Printf("Error getting debts for user %s: %v", principalDiscordID, queryErr)
+		log.Printf("Error querying debts with details (mode: %s) for %s (dbID %d): %v",
+			mode, principalDiscordID, principalDbID, err)
 		return
 	}
 
+	// Format the title based on the mode
 	var title string
-	if mode == "debtor" {
+	if isDebtor {
 		title = fmt.Sprintf("หนี้สินของ <@%s> (ที่ต้องจ่ายคนอื่น):\n", principalDiscordID)
 	} else {
 		title = fmt.Sprintf("ยอดค้างชำระถึง <@%s> (ที่คนอื่นต้องจ่าย):\n", principalDiscordID)
 	}
 
+	// Build the response
 	var response strings.Builder
 	response.WriteString(title)
 
+	// Handle case with no debts
 	if len(debts) == 0 {
-		if mode == "debtor" {
+		if isDebtor {
 			response.WriteString(fmt.Sprintf("<@%s> ไม่มีหนี้สินค้างชำระ! 🎉\n", principalDiscordID))
 		} else {
 			response.WriteString(fmt.Sprintf("ดูเหมือนว่าทุกคนจะชำระหนี้ให้ <@%s> หมดแล้ว 👍\n", principalDiscordID))
 		}
 	} else {
+		// Format each debt with its details
 		for _, debt := range debts {
-			otherPartyDiscordID := debt["discord_id"].(string)
-			amount := debt["amount"].(float64)
+			// Truncate details if too long
+			details := debt.Details
+			maxDetailLen := 150 // Max length for details string in the summary
+			if len(details) > maxDetailLen {
+				details = details[:maxDetailLen-3] + "..."
+			}
 
-			if mode == "debtor" {
-				response.WriteString(fmt.Sprintf("- **%.2f บาท** ให้ <@%s>\n", amount, otherPartyDiscordID))
+			// Format based on the mode
+			if isDebtor {
+				response.WriteString(fmt.Sprintf("- **%.2f บาท** ให้ <@%s> (รายละเอียดล่าสุด: %s)\n",
+					debt.Amount, debt.OtherPartyDiscordID, details))
 			} else {
-				response.WriteString(fmt.Sprintf("- <@%s> เป็นหนี้ **%.2f บาท**\n", otherPartyDiscordID, amount))
+				response.WriteString(fmt.Sprintf("- <@%s> เป็นหนี้ **%.2f บาท** (รายละเอียดล่าสุด: %s)\n",
+					debt.OtherPartyDiscordID, debt.Amount, details))
 			}
 		}
 	}
 
+	// Send the response
 	s.ChannelMessageSend(m.ChannelID, response.String())
 }
 
@@ -642,26 +736,27 @@ func updatePaidStatus(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 // handleRequestPayment handles the !request command
 func handleRequestPayment(s *discordgo.Session, m *discordgo.MessageCreate) {
-	debtorDiscordID, creditorPromptPayID, err := parseRequestPaymentArgs(m.Content)
+	creditorDiscordID := m.Author.ID // The one making the request is the creditor
+	creditorDbID, err := db.GetOrCreateUser(creditorDiscordID)
+	if err != nil {
+		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดกับฐานข้อมูลสำหรับคุณ (<@%s>)", creditorDiscordID))
+		return
+	}
+
+	debtorDiscordID, creditorPromptPayID, err := parseRequestPaymentArgs(m.Content, creditorDbID)
 	if err != nil {
 		sendErrorMessage(s, m.ChannelID, err.Error())
 		return
 	}
 
-	creditorDiscordID := m.Author.ID // The one making the request is the creditor
+	//if debtorDiscordID == creditorDiscordID {
+	//	sendErrorMessage(s, m.ChannelID, "คุณไม่สามารถร้องขอการชำระเงินจากตัวเองได้")
+	//	return
+	//}
 
-	if debtorDiscordID == creditorDiscordID {
-		sendErrorMessage(s, m.ChannelID, "คุณไม่สามารถร้องขอการชำระเงินจากตัวเองได้")
-		return
-	}
 	debtorDbID, err := db.GetOrCreateUser(debtorDiscordID)
 	if err != nil {
 		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดกับฐานข้อมูลสำหรับลูกหนี้ <@%s>", debtorDiscordID))
-		return
-	}
-	creditorDbID, err := db.GetOrCreateUser(creditorDiscordID)
-	if err != nil {
-		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("เกิดข้อผิดพลาดกับฐานข้อมูลสำหรับคุณ (<@%s>)", creditorDiscordID))
 		return
 	}
 
@@ -878,16 +973,20 @@ func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 	helpMessage := `
 **คำสั่งพื้นฐาน:**
 - ` + "`!bill [promptpay_id]`" + ` - สร้างบิลแบ่งจ่าย (ต้องตามด้วยรายการในบรรทัดถัดไป)
-- ` + "`!qr <amount> to @user for <description> <promptpay_id>`" + ` - สร้าง QR รับชำระจากผู้ใช้
+- ` + "`!qr <amount> to @user [for <description>] [promptpay_id]`" + ` - สร้าง QR รับชำระจากผู้ใช้
 - ` + "`!mydebts`" + ` - ดูยอดหนี้ที่คุณต้องจ่ายผู้อื่น
 - ` + "`!mydues`" + ` (หรือ ` + "`!owedtome`" + `) - ดูยอดเงินที่ผู้อื่นเป็นหนี้คุณ
 - ` + "`!debts @user`" + ` - ดูยอดหนี้ที่ผู้ใช้รายนั้นเป็นหนี้ผู้อื่น
 - ` + "`!dues @user`" + ` - ดูยอดเงินที่ผู้อื่นเป็นหนี้ผู้ใช้รายนั้น
-- ` + "`!request @user <your_promptpay_id>`" + ` - ส่งคำขอชำระเงินไปยังผู้ใช้
+- ` + "`!request @user [promptpay_id]`" + ` - ส่งคำขอชำระเงินไปยังผู้ใช้
 - ` + "`!paid <txID>`" + ` - ทำเครื่องหมายว่ารายการชำระแล้ว (ต้องเป็นผู้รับเงินเท่านั้น)
 
+**คำสั่งจัดการ PromptPay ID:**
+- ` + "`!setpromptpay <promptpay_id>`" + ` - ตั้งค่า PromptPay ID ของคุณ
+- ` + "`!mypromptpay`" + ` - แสดง PromptPay ID ที่คุณบันทึกไว้
+
 **รูปแบบการสร้างบิล:**
-- บรรทัดแรก: ` + "`!bill [promptpay_id]`" + `
+- บรรทัดแรก: ` + "`!bill [promptpay_id]`" + ` (ถ้าไม่ระบุจะใช้ PromptPay ID ที่บันทึกไว้)
 - บรรทัดถัดไป (รายการ): ` + "`<amount> for <description> with @user1 @user2...`" + `
 - หรือ (รูปแบบสั้น): ` + "`<amount> <description> @user1 @user2...`" + `
 

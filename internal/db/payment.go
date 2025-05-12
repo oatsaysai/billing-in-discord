@@ -12,9 +12,50 @@ import (
 
 // Define regex patterns for transaction ID extraction
 var (
-	txIDRegex  = regexp.MustCompile(`(?:TxID|Tx ID):\s*(\d+)`)
-	txIDsRegex = regexp.MustCompile(`(?:TxIDs|Tx IDs):\s*([\d,\s]+)`)
+	txIDRegex      = regexp.MustCompile(`(?:TxID|Tx ID):\s*(\d+)`)
+	txIDsRegex     = regexp.MustCompile(`(?:TxIDs|Tx IDs):\s*([\d,\s]+)`)
+	promptPayRegex = regexp.MustCompile(`^(\d{10}|\d{13}|ewallet-\d+)$`)
 )
+
+// IsValidPromptPayID checks if a string is a valid PromptPay ID
+func IsValidPromptPayID(promptPayID string) bool {
+	return promptPayRegex.MatchString(promptPayID)
+}
+
+// SetUserPromptPayID sets a user's PromptPay ID
+func SetUserPromptPayID(userDBID int, promptPayID string) error {
+	if !IsValidPromptPayID(promptPayID) {
+		return fmt.Errorf("รูปแบบ PromptPay ID ไม่ถูกต้อง ต้องเป็นเบอร์โทร 10 หลัก หรือบัตรประชาชน 13 หลัก หรือ ewallet-XXX")
+	}
+
+	query := `
+		INSERT INTO user_promptpay (user_id, promptpay_id)
+		VALUES ($1, $2)
+		ON CONFLICT (user_id)
+		DO UPDATE SET promptpay_id = EXCLUDED.promptpay_id, updated_at = CURRENT_TIMESTAMP;
+	`
+	_, err := Pool.Exec(context.Background(), query, userDBID, promptPayID)
+	if err != nil {
+		log.Printf("Error setting PromptPay ID for user %d: %v", userDBID, err)
+		return fmt.Errorf("ไม่สามารถบันทึก PromptPay ID ของคุณได้: %w", err)
+	}
+	return nil
+}
+
+// GetUserPromptPayID gets a user's PromptPay ID
+func GetUserPromptPayID(userDBID int) (string, error) {
+	var promptPayID string
+	query := `SELECT promptpay_id FROM user_promptpay WHERE user_id = $1`
+	err := Pool.QueryRow(context.Background(), query, userDBID).Scan(&promptPayID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("ยังไม่พบ PromptPay ID สำหรับคุณ กรุณาตั้งค่าด้วยคำสั่ง !setpromptpay")
+		}
+		log.Printf("Error getting PromptPay ID for user %d: %v", userDBID, err)
+		return "", fmt.Errorf("ไม่สามารถดึงข้อมูล PromptPay ID ของคุณได้: %w", err)
+	}
+	return promptPayID, nil
+}
 
 // FindIntendedPayee attempts to determine the intended payee for a payment
 // based on the debtor and amount. It returns the payee's Discord ID if found,
