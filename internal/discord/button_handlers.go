@@ -2,7 +2,6 @@ package discord
 
 import (
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 
@@ -25,7 +24,8 @@ func handlePayDebtButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	var payeeID string
 	var amount float64
-	var err error
+	var description string
+	var txIDs []int
 
 	// Check if this is a transaction-specific button or general debt
 	if strings.HasPrefix(targetID, "tx") {
@@ -45,6 +45,8 @@ func handlePayDebtButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 		payeeDbID := txInfo["payee_id"].(int)
 		amount = txInfo["amount"].(float64)
+		description = fmt.Sprintf("ชำระรายการ #%d", txID)
+		txIDs = []int{txID}
 
 		// Get Discord ID from DB ID
 		payeeDiscordID, err := db.GetDiscordIDFromDbID(payeeDbID)
@@ -56,6 +58,7 @@ func handlePayDebtButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	} else {
 		// General debt: target ID is directly the creditor's Discord ID
 		payeeID = targetID
+		description = "ชำระหนี้รวม"
 
 		// Get total debt amount
 		debtorDbID, err := db.GetOrCreateUser(i.Member.User.ID)
@@ -75,6 +78,12 @@ func handlePayDebtButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			respondWithError(s, i, fmt.Sprintf("ไม่สามารถดึงยอดหนี้สินได้: %v", err))
 			return
 		}
+
+		// Get unpaid transaction IDs
+		ids, _, _, err := db.GetUnpaidTransactionIDsAndDetails(debtorDbID, payeeDbID, 20)
+		if err == nil {
+			txIDs = ids
+		}
 	}
 
 	// Get promptPayID for the payee
@@ -85,62 +94,27 @@ func handlePayDebtButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	promptPayID, err := db.GetUserPromptPayID(payeeDbID)
-	if err != nil {
-		promptPayID = "ไม่พบข้อมูล PromptPay"
+	if err != nil || promptPayID == "" {
+		respondWithError(s, i, "ไม่พบข้อมูล PromptPay ของผู้รับเงิน")
+		return
 	}
 
-	// Create and show a modal for payment confirmation
-	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseModal,
+	// Acknowledge the interaction
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			CustomID: fmt.Sprintf("modal_pay_debt_%s", targetID),
-			Title:    "ชำระหนี้",
-			Components: []discordgo.MessageComponent{
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.TextInput{
-							CustomID:    "amount",
-							Label:       "จำนวนเงิน",
-							Style:       discordgo.TextInputShort,
-							Placeholder: "กรอกจำนวนเงินที่ต้องการชำระ",
-							Required:    true,
-							Value:       fmt.Sprintf("%.2f", amount),
-							MinLength:   1,
-							MaxLength:   10,
-						},
-					},
-				},
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.TextInput{
-							CustomID:    "recipient_prompt_pay",
-							Label:       "PromptPay ผู้รับเงิน",
-							Style:       discordgo.TextInputShort,
-							Placeholder: "PromptPay ID ของผู้รับเงิน",
-							Required:    false,
-							Value:       promptPayID,
-							MinLength:   0,
-							MaxLength:   30,
-						},
-					},
-				},
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.TextInput{
-							CustomID:    "note",
-							Label:       "บันทึกเพิ่มเติม (ถ้ามี)",
-							Style:       discordgo.TextInputParagraph,
-							Placeholder: "บันทึกเพิ่มเติมสำหรับการชำระเงินนี้",
-							Required:    false,
-							MaxLength:   100,
-						},
-					},
-				},
-			},
+			Content: "กำลังสร้าง QR Code สำหรับการชำระเงิน...",
+			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	})
 
-	if err != nil {
-		log.Printf("Error showing payment modal: %v", err)
-	}
+	// Generate QR code directly
+	debtorDiscordID := i.Member.User.ID
+	generateAndSendQrCode(s, i.ChannelID, promptPayID, amount, debtorDiscordID, description, txIDs)
+
+	// Send a follow-up message
+	s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content: "✅ QR Code ได้ถูกสร้างและส่งไปในช่องสนทนาแล้ว\n" +
+			"หากต้องการยืนยันการชำระเงิน โปรดตอบกลับข้อความ QR Code พร้อมแนบสลิปของคุณ",
+	})
 }

@@ -13,8 +13,9 @@ const (
 	requestPaymentButtonPrefix = "request_payment_"
 	markPaidButtonPrefix       = "mark_paid_"
 	confirmPaymentButtonPrefix = "confirm_payment_"
-	cancelActionButtonPrefix   = "cancel_action_"
 	viewDuesButtonPrefix       = "view_dues_"
+	cancelActionButtonPrefix   = "cancel_action_"
+	billAllocateButtonPrefix   = "bill_allocate_"
 	debtDropdownID             = "debt_dropdown"
 )
 
@@ -42,12 +43,12 @@ func handleMessageComponentInteraction(s *discordgo.Session, i *discordgo.Intera
 		handleMarkPaidButton(s, i)
 	case strings.HasPrefix(customID, confirmPaymentButtonPrefix):
 		handleConfirmPaymentButton(s, i)
-	case strings.HasPrefix(customID, cancelActionButtonPrefix):
-		handleCancelActionButton(s, i)
 	case strings.HasPrefix(customID, requestPaymentButtonPrefix):
 		handleRequestPaymentButton(s, i)
 	case strings.HasPrefix(customID, viewDuesButtonPrefix):
 		handleViewDuesButton(s, i)
+	case strings.HasPrefix(customID, billAllocateButtonPrefix):
+		handleBillAllocateButton(s, i)
 	case customID == debtDropdownID:
 		handleDebtDropdown(s, i)
 	default:
@@ -77,9 +78,10 @@ func respondWithError(s *discordgo.Session, i *discordgo.InteractionCreate, mess
 func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	customID := i.ModalSubmitData().CustomID
 
-	// Example: modal_pay_debt_<txID>
 	if strings.HasPrefix(customID, "modal_pay_debt_") {
 		handlePayDebtModalSubmit(s, i)
+	} else if strings.HasPrefix(customID, "modal_bill_allocate_") {
+		handleBillAllocateModalSubmit(s, i)
 	} else {
 		log.Printf("Unknown modal interaction: %s", customID)
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{

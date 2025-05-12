@@ -392,9 +392,17 @@ func parseAltBillItem(line string) (amount float64, description string, mentions
 
 // handleBillCommand handles the !bill command
 func handleBillCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	// Check if there's an attachment (bill image)
+	if len(m.Attachments) > 0 {
+		// Process the first attachment as a bill image
+		handleOCRBillAttachment(s, m, m.Attachments[0])
+		return
+	}
+
+	// No attachments, process as a regular text bill
 	lines := strings.Split(strings.TrimSpace(m.Content), "\n")
 	if len(lines) < 2 {
-		sendErrorMessage(s, m.ChannelID, "รูปแบบ `!bill` ไม่ถูกต้อง ต้องมีอย่างน้อย 2 บรรทัด (บรรทัดแรกคือคำสั่ง บรรทัดถัดไปคือรายการ)")
+		sendErrorMessage(s, m.ChannelID, "รูปแบบ `!bill` ไม่ถูกต้อง ต้องมีอย่างน้อย 2 บรรทัด (บรรทัดแรกคือคำสั่ง บรรทัดถัดไปคือรายการ) หรือแนบรูปภาพบิล")
 		return
 	}
 
@@ -989,7 +997,7 @@ func handleDownWebCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	helpMessage := `
 **คำสั่งพื้นฐาน:**
-- ` + "`!bill [promptpay_id]`" + ` - สร้างบิลแบ่งจ่าย (ต้องตามด้วยรายการในบรรทัดถัดไป)
+- ` + "`!bill [promptpay_id]`" + ` - สร้างบิลแบ่งจ่าย (ต้องตามด้วยรายการในบรรทัดถัดไป หรือแนบรูปภาพบิล)
 - ` + "`!qr <amount> to @user [for <description>] [promptpay_id]`" + ` - สร้าง QR รับชำระจากผู้ใช้
 - ` + "`!mydebts`" + ` - ดูยอดหนี้ที่คุณต้องจ่ายผู้อื่น
 - ` + "`!mydues`" + ` (หรือ ` + "`!owedtome`" + `) - ดูยอดเงินที่ผู้อื่นเป็นหนี้คุณ
@@ -1012,12 +1020,18 @@ func handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 - บรรทัดแรก: ` + "`!bill [promptpay_id]`" + ` (ถ้าไม่ระบุจะใช้ PromptPay ID ที่บันทึกไว้)
 - บรรทัดถัดไป (รายการ): ` + "`<amount> for <description> with @user1 @user2...`" + `
 - หรือ (รูปแบบสั้น): ` + "`<amount> <description> @user1 @user2...`" + `
+- หรือ แนบรูปภาพบิลพร้อมคำสั่ง ` + "`!bill`" + ` เพื่อให้ระบบวิเคราะห์รายการด้วย OCR
 
 **ตัวอย่าง:**
 ` + "```" + `
 !bill 081-234-5678
 100 for dinner with @UserA @UserB
 50 drinks @UserB
+` + "```" + `
+หรือ
+` + "```" + `
+!bill
+[แนบรูปภาพบิล]
 ` + "```" + `
 
 **การตรวจสอบการชำระเงิน:**

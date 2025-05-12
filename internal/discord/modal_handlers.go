@@ -2,7 +2,6 @@ package discord
 
 import (
 	"fmt"
-	_ "log"
 	"strconv"
 	"strings"
 
@@ -24,31 +23,10 @@ func handlePayDebtModalSubmit(s *discordgo.Session, i *discordgo.InteractionCrea
 
 	targetID := parts[3]
 
-	// Get the input values
-	var amountStr, promptPayID, note string
-
-	for _, comp := range data.Components {
-		actionRow, ok := comp.(discordgo.ActionsRow)
-		if !ok {
-			continue
-		}
-
-		for _, c := range actionRow.Components {
-			textInput, ok := c.(discordgo.TextInput)
-			if !ok {
-				continue
-			}
-
-			switch textInput.CustomID {
-			case "amount":
-				amountStr = textInput.Value
-			case "recipient_prompt_pay":
-				promptPayID = textInput.Value
-			case "note":
-				note = textInput.Value
-			}
-		}
-	}
+	// Get the input values directly from the data
+	amountStr := data.Components[0].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
+	promptPayID := data.Components[1].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
+	note := data.Components[2].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
 
 	// Parse the amount
 	amount, err := strconv.ParseFloat(amountStr, 64)
