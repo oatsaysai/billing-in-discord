@@ -70,8 +70,7 @@ func handleOCRBillAttachment(s *discordgo.Session, m *discordgo.MessageCreate, a
 
 	summary.WriteString("**รายการ**:\n")
 	for i, item := range billData.Items {
-		total := float64(item.Quantity) * item.Price
-		summary.WriteString(fmt.Sprintf("%d. %s x%d = %.2f บาท\n", i+1, item.Name, item.Quantity, total))
+		summary.WriteString(fmt.Sprintf("%d. %s x%d = %.2f บาท\n", i+1, item.Name, item.Quantity, item.Price))
 	}
 
 	if billData.SubTotal > 0 {
@@ -153,43 +152,59 @@ func handleBillAllocateButton(s *discordgo.Session, i *discordgo.InteractionCrea
 		return
 	}
 
-	// Create text input components for each item in the bill
+	// Create text input components for the modal - Discord has a limit of 5 components per modal
 	var components []discordgo.MessageComponent
 
-	// Create text inputs with a reasonable limit
-	itemLimit := 5 // Limit to 5 items due to Discord's modal component limit
+	// Format the items as a list for display
+	var itemsList strings.Builder
 	for idx, item := range billData.Items {
-		if idx >= itemLimit {
+		if idx >= 10 { // Limit to 10 items in the display
 			break
 		}
 
 		itemTotal := item.Price * float64(item.Quantity)
-		itemLabel := fmt.Sprintf("%s (%.2f บาท)", item.Name, itemTotal)
-
-		// Create a text input for each item
-		components = append(components, discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{
-				discordgo.TextInput{
-					CustomID:    fmt.Sprintf("item_%d", idx),
-					Label:       itemLabel,
-					Style:       discordgo.TextInputShort,
-					Placeholder: "ระบุ @user1 @user2 หรือ all สำหรับทุกคน",
-					Required:    false,
-					MinLength:   0,
-					MaxLength:   100,
-				},
-			},
-		})
+		itemsList.WriteString(fmt.Sprintf("%d. %s (%.2f บาท)\n", idx+1, item.Name, itemTotal))
 	}
 
-	// Add an extra text input for additional items or special charges
+	// 1. Item allocation text area
+	components = append(components, discordgo.ActionsRow{
+		Components: []discordgo.MessageComponent{
+			discordgo.TextInput{
+				CustomID:    "items_allocation",
+				Label:       "รายการสินค้า",
+				Style:       discordgo.TextInputParagraph,
+				Placeholder: "เช่น '1 @user1 @user2' (แต่ละรายการคนละบรรทัด)",
+				Required:    false,
+				MinLength:   0,
+				MaxLength:   300,
+				Value:       itemsList.String(),
+			},
+		},
+	})
+
+	// 2. All users input
+	components = append(components, discordgo.ActionsRow{
+		Components: []discordgo.MessageComponent{
+			discordgo.TextInput{
+				CustomID:    "all_users",
+				Label:       "ผู้ใช้ทั้งหมดที่ร่วมจ่าย (ต้องระบุ)",
+				Style:       discordgo.TextInputShort,
+				Placeholder: "ระบุ @user1 @user2 @user3",
+				Required:    true,
+				MinLength:   3,
+				MaxLength:   100,
+			},
+		},
+	})
+
+	// 3. Additional items text area
 	components = append(components, discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
 			discordgo.TextInput{
 				CustomID:    "additional_items",
-				Label:       "รายการเพิ่มเติมหรือค่าบริการอื่นๆ",
+				Label:       "รายการเพิ่มเติม (เช่น ค่าบริการ)",
 				Style:       discordgo.TextInputParagraph,
-				Placeholder: "ระบุรายการเพิ่มเติม เช่น 'ค่าบริการ 100 @user1 @user2' หรือเว้นว่างไว้",
+				Placeholder: "เช่น 'ค่าบริการ 100 @user1 @user2' (แต่ละรายการคนละบรรทัด)",
 				Required:    false,
 				MinLength:   0,
 				MaxLength:   300,
@@ -197,17 +212,32 @@ func handleBillAllocateButton(s *discordgo.Session, i *discordgo.InteractionCrea
 		},
 	})
 
-	// Add a text input for promptpay ID
+	// 4. PromptPay ID input
 	components = append(components, discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
 			discordgo.TextInput{
 				CustomID:    "promptpay_id",
 				Label:       "PromptPay ID (ถ้ามี)",
 				Style:       discordgo.TextInputShort,
-				Placeholder: "PromptPay ID ของผู้รับเงิน หรือเว้นว่างเพื่อใช้ค่าที่บันทึกไว้",
+				Placeholder: "เว้นว่างเพื่อใช้ค่าที่บันทึกไว้",
 				Required:    false,
 				MinLength:   0,
 				MaxLength:   20,
+			},
+		},
+	})
+
+	// 5. Instructions
+	components = append(components, discordgo.ActionsRow{
+		Components: []discordgo.MessageComponent{
+			discordgo.TextInput{
+				CustomID:  "instructions",
+				Label:     "คำแนะนำการใช้งาน",
+				Style:     discordgo.TextInputParagraph,
+				Required:  false,
+				MinLength: 0,
+				MaxLength: 300,
+				Value:     "การระบุรายการ: ใส่เลขรายการตามด้วย mention ผู้ใช้\nเช่น: 1 @user1 @user2\n2 @user3\n\nการระบุรายการเพิ่มเติม:\nชื่อรายการ จำนวนเงิน @user1 @user2",
 			},
 		},
 	})
@@ -249,9 +279,10 @@ func handleBillAllocateModalSubmit(s *discordgo.Session, i *discordgo.Interactio
 	}
 
 	// Extract the inputs from the modal
-	itemAllocations := make(map[int][]string) // Map of item index to list of user IDs
-	additionalItems := ""
-	promptPayID := ""
+	var itemsAllocationText string
+	var allUsersText string
+	var additionalItemsText string
+	var promptPayID string
 
 	for _, comp := range data.Components {
 		row, ok := comp.(discordgo.ActionsRow)
@@ -265,32 +296,81 @@ func handleBillAllocateModalSubmit(s *discordgo.Session, i *discordgo.Interactio
 				continue
 			}
 
-			if strings.HasPrefix(textInput.CustomID, "item_") {
-				// Extract item index
-				idxStr := strings.TrimPrefix(textInput.CustomID, "item_")
-				idx, err := strconv.Atoi(idxStr)
-				if err != nil {
-					continue
-				}
-
-				// Parse user mentions or "all"
-				if textInput.Value == "all" {
-					itemAllocations[idx] = []string{"all"}
-				} else {
-					// Extract user mentions
-					mentions := userMentionRegex.FindAllStringSubmatch(textInput.Value, -1)
-					if len(mentions) > 0 {
-						var userIDs []string
-						for _, mention := range mentions {
-							userIDs = append(userIDs, mention[1])
-						}
-						itemAllocations[idx] = userIDs
-					}
-				}
-			} else if textInput.CustomID == "additional_items" {
-				additionalItems = textInput.Value
-			} else if textInput.CustomID == "promptpay_id" {
+			switch textInput.CustomID {
+			case "items_allocation":
+				itemsAllocationText = textInput.Value
+			case "all_users":
+				allUsersText = textInput.Value
+			case "additional_items":
+				additionalItemsText = textInput.Value
+			case "promptpay_id":
 				promptPayID = textInput.Value
+			}
+		}
+	}
+
+	// Check if all_users field is filled (required)
+	if allUsersText == "" {
+		respondWithError(s, i, "กรุณาระบุผู้ใช้ทั้งหมดที่ร่วมจ่าย")
+		return
+	}
+
+	// Extract all mentioned users
+	allUsersMentions := userMentionRegex.FindAllStringSubmatch(allUsersText, -1)
+	if len(allUsersMentions) == 0 {
+		respondWithError(s, i, "ไม่พบการระบุผู้ใช้ในรูปแบบ @user กรุณาระบุผู้ใช้ในรูปแบบที่ถูกต้อง")
+		return
+	}
+
+	// Create a list of all users
+	var allUsers []string
+	for _, mention := range allUsersMentions {
+		allUsers = append(allUsers, mention[1])
+	}
+
+	// Parse item allocations from the text
+	itemAllocations := make(map[int][]string) // Map of item index to list of user IDs
+
+	// Parse each line of the items allocation text
+	if itemsAllocationText != "" {
+		lines := strings.Split(itemsAllocationText, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || !strings.ContainsAny(line, "123456789") {
+				continue // Skip empty lines or lines without numbers
+			}
+
+			// Try to extract the item number from the beginning of the line
+			parts := strings.Fields(line)
+			if len(parts) < 2 {
+				continue
+			}
+
+			// First part should be the item number
+			itemNumStr := parts[0]
+			itemNum, err := strconv.Atoi(itemNumStr)
+			if err != nil {
+				continue // Not a valid item number
+			}
+
+			// Adjust item number to 0-based index
+			itemIdx := itemNum - 1
+			if itemIdx < 0 || itemIdx >= len(billData.Items) {
+				continue // Invalid item index
+			}
+
+			// Check if there are user mentions in the line
+			mentions := userMentionRegex.FindAllStringSubmatch(line, -1)
+			if len(mentions) > 0 {
+				// Add the mentioned users to the item
+				var userIDs []string
+				for _, mention := range mentions {
+					userIDs = append(userIDs, mention[1])
+				}
+				itemAllocations[itemIdx] = userIDs
+			} else if strings.Contains(strings.ToLower(line), "all") {
+				// If the line contains "all", allocate to all users
+				itemAllocations[itemIdx] = []string{"all"}
 			}
 		}
 	}
@@ -305,7 +385,7 @@ func handleBillAllocateModalSubmit(s *discordgo.Session, i *discordgo.Interactio
 	})
 
 	// Process the bill and create transactions
-	successMsg, err := processBillAllocation(s, i, billData, itemAllocations, additionalItems, promptPayID)
+	successMsg, err := processBillAllocation(s, i, billData, itemAllocations, additionalItemsText, promptPayID)
 	if err != nil {
 		s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 			Content: fmt.Sprintf("⚠️ เกิดข้อผิดพลาดในการสร้างบิล: %v", err),
