@@ -175,6 +175,19 @@ func handleBillAllocateButton(s *discordgo.Session, i *discordgo.InteractionCrea
 		return
 	}
 
+	// ตรวจสอบว่าผู้ใช้ที่กดปุ่มเป็นคนเริ่มคำสั่งเปิดบิลหรือไม่
+	originalMsg, err := s.ChannelMessage(i.ChannelID, messageID)
+	if err != nil {
+		respondWithError(s, i, "ไม่สามารถตรวจสอบข้อมูลผู้เริ่มคำสั่งได้")
+		return
+	}
+
+	// ตรวจสอบว่าผู้กดปุ่มเป็นคนเดียวกับคนที่อัปโหลดบิลหรือไม่
+	if originalMsg.Author.ID != i.Member.User.ID {
+		respondWithError(s, i, "ขออภัย คุณไม่มีสิทธิ์ในการดำเนินการนี้ เฉพาะผู้เริ่มคำสั่งเปิดบิลเท่านั้นที่สามารถระบุรายการได้")
+		return
+	}
+
 	// Send a message with user select component to select all users who will share this bill
 	respondWithUserSelect(s, i, messageID)
 }
