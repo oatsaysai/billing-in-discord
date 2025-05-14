@@ -56,12 +56,12 @@ func (c *Client) ValidateSiteName(siteName string) error {
 	if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,20}[a-z0-9]$`).MatchString(siteName) {
 		return fmt.Errorf("site name must be 3-22 characters long, containing only lowercase letters, numbers, and hyphens. Cannot start or end with a hyphen")
 	}
-	
+
 	// Ensure it has the correct prefix
 	if !strings.HasPrefix(siteName, c.SiteNamePrefix) {
 		return fmt.Errorf("site name must start with prefix: %s", c.SiteNamePrefix)
 	}
-	
+
 	return nil
 }
 
@@ -71,28 +71,28 @@ func (c *Client) CreateSite(siteName string) (*SiteCreateResult, error) {
 	if err := c.ValidateSiteName(siteName); err != nil {
 		return nil, err
 	}
-	
+
 	// Create the site using the Firebase CLI
 	cmd := exec.Command(c.CLIPath, "hosting:sites:create", siteName, "--project", c.ProjectID, "--json")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Firebase site: %s (error: %w)", string(output), err)
 	}
-	
+
 	// Extract JSON part if needed
 	jsonPart := extractJSON(string(output))
-	
+
 	// Parse the result
 	var result SiteCreateResult
 	if err := json.Unmarshal([]byte(jsonPart), &result); err != nil {
 		return nil, fmt.Errorf("failed to parse Firebase CLI output: %w", err)
 	}
-	
+
 	// Check for Firebase error
 	if result.Error.Message != "" {
 		return nil, fmt.Errorf("Firebase error (code %d): %s", result.Error.Code, result.Error.Message)
 	}
-	
+
 	return &result, nil
 }
 
@@ -102,14 +102,14 @@ func (c *Client) DeleteSite(siteName string) error {
 	if err := c.ValidateSiteName(siteName); err != nil {
 		return err
 	}
-	
+
 	// Delete the site using the Firebase CLI
 	cmd := exec.Command(c.CLIPath, "hosting:sites:delete", siteName, "--project", c.ProjectID, "--force")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to delete Firebase site: %s (error: %w)", string(output), err)
 	}
-	
+
 	return nil
 }
 
@@ -119,31 +119,114 @@ func (c *Client) DeploySite(siteName, contentDir string) (*DeployResult, error) 
 	if err := c.ValidateSiteName(siteName); err != nil {
 		return nil, err
 	}
-	
+
 	// Check if content directory exists
 	if _, err := os.Stat(contentDir); os.IsNotExist(err) {
 		return nil, fmt.Errorf("content directory does not exist: %s", contentDir)
 	}
-	
+
 	// Create a temporary firebase.json file
 	tmpDir, err := os.MkdirTemp("", "firebase-deploy-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
-	
+
+	// ตรวจสอบว่าไดเรกทอรีมีอยู่จริง
+	contentDirInfo, err := os.Stat(contentDir)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("content directory does not exist: %s", contentDir)
+	}
+
+	// ตรวจสอบว่า contentDir เป็นไดเรกทอรีหรือไม่
+	if !contentDirInfo.IsDir() {
+		return nil, fmt.Errorf("provided path is not a directory: %s", contentDir)
+	}
+
+	// คัดลอกเนื้อหาจาก contentDir ไปยัง tmpDir/public
+	publicDir := filepath.Join(tmpDir, "public")
+	if err := os.MkdirAll(publicDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create public directory: %w", err)
+	}
+
+	// คัดลอกไฟล์ทั้งหมดจาก contentDir/public ไปยัง tmpDir/public
+	contentPublicDir := filepath.Join(contentDir, "public")
+	if _, err := os.Stat(contentPublicDir); !os.IsNotExist(err) {
+		// มีโฟลเดอร์ public ใน contentDir
+		err = filepath.Walk(contentPublicDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			// เส้นทางของไฟล์หรือไดเรกทอรีใน tmpDir/public
+			relPath, err := filepath.Rel(contentPublicDir, path)
+			if err != nil {
+				return err
+			}
+			destPath := filepath.Join(publicDir, relPath)
+
+			if info.IsDir() {
+				return os.MkdirAll(destPath, info.Mode())
+			}
+
+			// คัดลอกไฟล์
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(destPath, data, info.Mode())
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to copy content: %w", err)
+		}
+	} else {
+		// ไม่มีโฟลเดอร์ public ใน contentDir คัดลอกโดยตรง
+		err = filepath.Walk(contentDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			// เส้นทางของไฟล์หรือไดเรกทอรีใน tmpDir/public
+			relPath, err := filepath.Rel(contentDir, path)
+			if err != nil {
+				return err
+			}
+
+			// ข้ามไฟล์หรือไดเรกทอรีในไดเรกทอรีหลัก
+			if relPath == "." {
+				return nil
+			}
+
+			destPath := filepath.Join(publicDir, relPath)
+
+			if info.IsDir() {
+				return os.MkdirAll(destPath, info.Mode())
+			}
+
+			// คัดลอกไฟล์
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(destPath, data, info.Mode())
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to copy content: %w", err)
+		}
+	}
+
 	firebaseConfig := fmt.Sprintf(`{
 		"hosting": {
 			"site": "%s",
-			"public": "%s"
+			"public": "public"
 		}
-	}`, siteName, contentDir)
-	
+	}`, siteName)
+
 	firebaseJsonPath := filepath.Join(tmpDir, "firebase.json")
 	if err := os.WriteFile(firebaseJsonPath, []byte(firebaseConfig), 0644); err != nil {
 		return nil, fmt.Errorf("failed to write firebase.json: %w", err)
 	}
-	
+
 	// Deploy to Firebase
 	cmd := exec.Command(c.CLIPath, "deploy", "--only", "hosting:"+siteName, "--project", c.ProjectID, "--json")
 	cmd.Dir = tmpDir
@@ -151,21 +234,21 @@ func (c *Client) DeploySite(siteName, contentDir string) (*DeployResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to deploy to Firebase: %s (error: %w)", string(output), err)
 	}
-	
+
 	// Extract JSON part if needed
 	jsonPart := extractJSON(string(output))
-	
+
 	// Parse the result
 	var result DeployResult
 	if err := json.Unmarshal([]byte(jsonPart), &result); err != nil {
 		return nil, fmt.Errorf("failed to parse Firebase CLI output: %w", err)
 	}
-	
+
 	// Check for Firebase error
 	if result.Error.Message != "" {
 		return nil, fmt.Errorf("Firebase error (code %d): %s", result.Error.Code, result.Error.Message)
 	}
-	
+
 	return &result, nil
 }
 

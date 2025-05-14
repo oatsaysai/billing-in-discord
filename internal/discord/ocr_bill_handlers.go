@@ -1,16 +1,24 @@
 package discord
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"github.com/oatsaysai/billing-in-discord/pkg/ocr"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/oatsaysai/billing-in-discord/pkg/ocr"
+
 	"github.com/bwmarrin/discordgo"
 	"github.com/oatsaysai/billing-in-discord/internal/db"
+	"github.com/oatsaysai/billing-in-discord/internal/firebase"
+	fbclient "github.com/oatsaysai/billing-in-discord/pkg/firebase"
 )
 
 // handleOCRBillAttachment processes the bill image using OCR
@@ -120,6 +128,21 @@ func handleOCRBillAttachment(s *discordgo.Session, m *discordgo.MessageCreate, a
 // Global map to store OCR bill data temporarily
 var billOCRDataStore = make(map[string]*ocr.ExtractBillTextResponse)
 
+// Global map to store selected users temporarily
+var tempSelectedUsers = make(map[string][]string) // map[messageID][]userID
+
+// Global map to store tokens for web sessions
+var webSessionTokens = make(map[string]WebSessionData)
+
+// WebSessionData stores data for a web session
+type WebSessionData struct {
+	BillData      *ocr.ExtractBillTextResponse
+	SelectedUsers []string
+	OwnerID       string
+	ChannelID     string
+	CreatedAt     time.Time
+}
+
 // storeBillOCRData stores the bill data in memory
 func storeBillOCRData(messageID string, data *ocr.ExtractBillTextResponse) {
 	billOCRDataStore[messageID] = data
@@ -152,123 +175,56 @@ func handleBillAllocateButton(s *discordgo.Session, i *discordgo.InteractionCrea
 		return
 	}
 
-	// Create text input components for the modal - Discord has a limit of 5 components per modal
-	var components []discordgo.MessageComponent
+	// Send a message with user select component to select all users who will share this bill
+	respondWithUserSelect(s, i, messageID)
+}
 
-	// Format the items as a list for display
-	var itemsList strings.Builder
-	for idx, item := range billData.Items {
-		if idx >= 10 { // Limit to 10 items in the display
-			break
-		}
+// respondWithUserSelect sends a user select component to select users
+func respondWithUserSelect(s *discordgo.Session, i *discordgo.InteractionCreate, messageID string) {
+	// Define min value (needs to be a pointer)
+	minV := 1
 
-		itemTotal := item.Price * float64(item.Quantity)
-		itemsList.WriteString(fmt.Sprintf("%d. %s (%.2f บาท)\n", idx+1, item.Name, itemTotal))
+	// Create user select component
+	userSelect := discordgo.SelectMenu{
+		CustomID:    fmt.Sprintf("bill_users_select_%s", messageID),
+		Placeholder: "เลือกผู้ใช้ทั้งหมดที่ร่วมจ่ายบิลนี้",
+		MinValues:   &minV,                    // MinValues is *int
+		MaxValues:   25,                       // MaxValues is int in this version
+		MenuType:    discordgo.UserSelectMenu, // Use MenuType and the UserSelectMenu constant
+		// Options: []discordgo.SelectMenuOption{}, // Not needed for UserSelectMenu
 	}
 
-	// 1. Item allocation text area
-	components = append(components, discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
-			discordgo.TextInput{
-				CustomID:    "items_allocation",
-				Label:       "รายการสินค้า",
-				Style:       discordgo.TextInputParagraph,
-				Placeholder: "เช่น '1 @user1 @user2' (แต่ละรายการคนละบรรทัด)",
-				Required:    false,
-				MinLength:   0,
-				MaxLength:   300,
-				Value:       itemsList.String(),
-			},
-		},
-	})
-
-	// 2. All users input
-	components = append(components, discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
-			discordgo.TextInput{
-				CustomID:    "all_users",
-				Label:       "ผู้ใช้ทั้งหมดที่ร่วมจ่าย (ต้องระบุ)",
-				Style:       discordgo.TextInputShort,
-				Placeholder: "ระบุ @user1 @user2 @user3",
-				Required:    true,
-				MinLength:   3,
-				MaxLength:   100,
-			},
-		},
-	})
-
-	// 3. Additional items text area
-	components = append(components, discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
-			discordgo.TextInput{
-				CustomID:    "additional_items",
-				Label:       "รายการเพิ่มเติม (เช่น ค่าบริการ)",
-				Style:       discordgo.TextInputParagraph,
-				Placeholder: "เช่น 'ค่าบริการ 100 @user1 @user2' (แต่ละรายการคนละบรรทัด)",
-				Required:    false,
-				MinLength:   0,
-				MaxLength:   300,
-			},
-		},
-	})
-
-	// 4. PromptPay ID input
-	components = append(components, discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
-			discordgo.TextInput{
-				CustomID:    "promptpay_id",
-				Label:       "PromptPay ID (ถ้ามี)",
-				Style:       discordgo.TextInputShort,
-				Placeholder: "เว้นว่างเพื่อใช้ค่าที่บันทึกไว้",
-				Required:    false,
-				MinLength:   0,
-				MaxLength:   20,
-			},
-		},
-	})
-
-	// 5. Instructions
-	components = append(components, discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
-			discordgo.TextInput{
-				CustomID:  "instructions",
-				Label:     "คำแนะนำการใช้งาน",
-				Style:     discordgo.TextInputParagraph,
-				Required:  false,
-				MinLength: 0,
-				MaxLength: 300,
-				Value:     "การระบุรายการ: ใส่เลขรายการตามด้วย mention ผู้ใช้\nเช่น: 1 @user1 @user2\n2 @user3\n\nการระบุรายการเพิ่มเติม:\nชื่อรายการ จำนวนเงิน @user1 @user2",
-			},
-		},
-	})
-
-	// Create and show the modal
+	// Respond with the user select component
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseModal,
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			CustomID:   fmt.Sprintf("modal_bill_allocate_%s", messageID),
-			Title:      "ระบุผู้ร่วมจ่ายในแต่ละรายการ",
-			Components: components,
+			Content: "โปรดเลือกผู้ใช้ทั้งหมดที่ร่วมจ่ายบิลนี้ (รวมตัวคุณเองด้วยถ้าคุณเป็นหนึ่งในผู้ร่วมจ่าย):",
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						userSelect,
+					},
+				},
+			},
+			Flags: discordgo.MessageFlagsEphemeral,
 		},
 	})
 
 	if err != nil {
-		log.Printf("Error showing bill allocation modal: %v", err)
+		log.Printf("Error sending user select component for messageID %s: %v", messageID, err)
 	}
 }
 
-// handleBillAllocateModalSubmit handles the submission of the bill allocation modal
-func handleBillAllocateModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	data := i.ModalSubmitData()
-
-	// Get the message ID from the modal custom ID
-	// Format: modal_bill_allocate_<messageID>
+// handleUserSelectSubmit handles the user selection submission
+func handleUserSelectSubmit(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.MessageComponentData()
 	parts := strings.Split(data.CustomID, "_")
 	if len(parts) < 4 {
-		respondWithError(s, i, "รูปแบบ modal ID ไม่ถูกต้อง")
+		respondWithError(s, i, "รูปแบบ custom ID ไม่ถูกต้อง")
 		return
 	}
 
+	// Extract the message ID that contains the bill data
 	messageID := parts[3]
 
 	// Get the bill data from memory
@@ -278,57 +234,252 @@ func handleBillAllocateModalSubmit(s *discordgo.Session, i *discordgo.Interactio
 		return
 	}
 
-	// Extract the inputs from the modal
-	var itemsAllocationText string
-	var allUsersText string
-	var additionalItemsText string
-	var promptPayID string
+	// Get the selected user IDs
+	selectedUserIDs := data.Values
 
-	for _, comp := range data.Components {
-		row, ok := comp.(discordgo.ActionsRow)
-		if !ok {
+	// Store the selected users in memory for later use
+	tempSelectedUsers[messageID] = selectedUserIDs
+
+	// Acknowledge the selection
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:    fmt.Sprintf("✅ เลือกผู้ใช้ %d คนเรียบร้อยแล้ว กำลังสร้างเว็บไซต์สำหรับแบ่งรายการ...", len(selectedUserIDs)),
+			Components: []discordgo.MessageComponent{}, // Remove the user select component
+		},
+	})
+
+	if err != nil {
+		log.Printf("Error acknowledging user selection: %v", err)
+		return
+	}
+
+	// Create a website on Firebase Hosting for bill allocation
+	createBillWebsite(s, i, messageID)
+}
+
+// createBillWebsite creates a website on Firebase Hosting for bill allocation
+func createBillWebsite(s *discordgo.Session, i *discordgo.InteractionCreate, messageID string) {
+	// Get the bill data from memory
+	billData := getBillOCRData(messageID)
+	if billData == nil {
+		sendFollowupError(s, i, "ไม่พบข้อมูลบิล หรือข้อมูลหมดอายุแล้ว")
+		return
+	}
+
+	// Get the selected users
+	selectedUsers, exists := tempSelectedUsers[messageID]
+	if !exists || len(selectedUsers) == 0 {
+		sendFollowupError(s, i, "ไม่พบข้อมูลผู้ใช้ที่เลือกไว้")
+		return
+	}
+
+	// Prepare user information for display on the website
+	webUsers := make([]map[string]interface{}, 0)
+	for _, userID := range selectedUsers {
+		user, err := s.User(userID)
+		if err != nil {
+			log.Printf("Error fetching user %s: %v", userID, err)
 			continue
 		}
 
-		for _, c := range row.Components {
-			textInput, ok := c.(discordgo.TextInput)
-			if !ok {
-				continue
-			}
+		webUsers = append(webUsers, map[string]interface{}{
+			"id":   userID,
+			"name": user.Username,
+		})
+	}
 
-			switch textInput.CustomID {
-			case "items_allocation":
-				itemsAllocationText = textInput.Value
-			case "all_users":
-				allUsersText = textInput.Value
-			case "additional_items":
-				additionalItemsText = textInput.Value
-			case "promptpay_id":
-				promptPayID = textInput.Value
+	// Prepare bill items information for display on the website
+	webItems := make([]map[string]interface{}, 0)
+	for i, item := range billData.Items {
+		webItems = append(webItems, map[string]interface{}{
+			"id":       i + 1,
+			"name":     item.Name,
+			"quantity": item.Quantity,
+			"price":    item.Price,
+			"total":    float64(item.Quantity) * item.Price,
+		})
+	}
+
+	// Generate a token for the web session
+	token := generateToken()
+
+	// Store the session data
+	webSessionTokens[token] = WebSessionData{
+		BillData:      billData,
+		SelectedUsers: selectedUsers,
+		OwnerID:       i.Member.User.ID,
+		ChannelID:     i.ChannelID,
+		CreatedAt:     time.Now(),
+	}
+
+	// Get the Firebase client from the discord package
+	fbClient := getFirebaseClient()
+	if fbClient == nil {
+		sendFollowupError(s, i, "Firebase client ไม่ได้ถูกกำหนดค่า")
+		return
+	}
+
+	// Deploy the website using the Firebase client
+	websiteURL, err := firebase.DeployBillWebsite(fbClient, token, billData.MerchantName, webItems, webUsers)
+	if err != nil {
+		log.Printf("Error deploying bill website: %v", err)
+		sendFollowupError(s, i, fmt.Sprintf("เกิดข้อผิดพลาดในการสร้างเว็บไซต์: %v", err))
+		return
+	}
+
+	// Send the website URL to the user
+	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Content: stringPtr(fmt.Sprintf("✅ สร้างเว็บไซต์สำหรับแบ่งรายการเรียบร้อยแล้ว\n\nโปรดเข้าไปที่ลิงก์นี้เพื่อระบุรายการที่แต่ละคนต้องจ่าย:\n%s\n\n⚠️ ลิงก์นี้จะหมดอายุใน 30 นาที", websiteURL)),
+	})
+}
+
+// generateToken generates a random token for web sessions
+func generateToken() string {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		log.Printf("Error generating random token: %v", err)
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return base64.URLEncoding.EncodeToString(b)
+}
+
+// getFirebaseClient returns the Firebase client
+func getFirebaseClient() *fbclient.Client {
+	return firebaseClient
+}
+
+// stringPtr returns a pointer to the given string
+func stringPtr(s string) *string {
+	return &s
+}
+
+// sendFollowupError sends a followup error message
+func sendFollowupError(s *discordgo.Session, i *discordgo.InteractionCreate, errorMsg string) {
+	// Add proper handling for return values
+	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content: fmt.Sprintf("⚠️ %s", errorMsg),
+		Flags:   discordgo.MessageFlagsEphemeral,
+	})
+
+	if err != nil {
+		log.Printf("Error sending followup error message: %v", err)
+	}
+}
+
+// HandleBillWebhookCallback processes callbacks from the bill allocation website
+func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read the request body
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		log.Printf("Error reading webhook request body: %v", err)
+		return
+	}
+
+	// Parse the JSON payload
+	var payload struct {
+		Token           string                   `json:"token"`
+		ItemAllocations map[string][]string      `json:"itemAllocations"` // Key is item index as string
+		AdditionalItems []map[string]interface{} `json:"additionalItems"`
+		PromptPayID     string                   `json:"promptPayID"`
+	}
+
+	err = json.Unmarshal(body, &payload)
+	if err != nil {
+		http.Error(w, "Failed to parse JSON payload", http.StatusBadRequest)
+		log.Printf("Error parsing webhook JSON payload: %v", err)
+		return
+	}
+
+	// Verify the token and retrieve session data
+	sessionData, exists := webSessionTokens[payload.Token]
+	if !exists {
+		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+		log.Printf("Invalid or expired token in webhook: %s", payload.Token)
+		return
+	}
+
+	// Convert string indices to integers in itemAllocations
+	itemAllocations := make(map[int][]string)
+	for itemIdxStr, users := range payload.ItemAllocations {
+		itemIdx, err := strconv.Atoi(itemIdxStr)
+		if err != nil {
+			// Skip invalid indices
+			log.Printf("Invalid item index in webhook payload: %s", itemIdxStr)
+			continue
+		}
+		itemAllocations[itemIdx] = users
+	}
+
+	// Convert additionalItems to the format expected by processBillAllocation
+	additionalItemsText := ""
+	for _, item := range payload.AdditionalItems {
+		if desc, ok := item["description"].(string); ok {
+			if amount, ok := item["amount"].(float64); ok {
+				if users, ok := item["users"].([]interface{}); ok {
+					// Format: "<description> <amount> @user1 @user2..."
+					line := fmt.Sprintf("%s %v", desc, amount)
+					for _, user := range users {
+						if userID, ok := user.(string); ok {
+							line += fmt.Sprintf(" <@%s>", userID)
+						}
+					}
+					additionalItemsText += line + "\n"
+				}
 			}
 		}
 	}
 
-	// Check if all_users field is filled (required)
-	if allUsersText == "" {
-		respondWithError(s, i, "กรุณาระบุผู้ใช้ทั้งหมดที่ร่วมจ่าย")
-		return
-	}
+	// Process the bill allocation asynchronously
+	go func() {
+		// Create a dummy interaction for processBillAllocation
+		dummyInteraction := &discordgo.InteractionCreate{
+			Interaction: &discordgo.Interaction{
+				Member: &discordgo.Member{
+					User: &discordgo.User{
+						ID: sessionData.OwnerID,
+					},
+				},
+				ChannelID: sessionData.ChannelID,
+			},
+		}
 
-	// Extract all mentioned users
-	allUsersMentions := userMentionRegex.FindAllStringSubmatch(allUsersText, -1)
-	if len(allUsersMentions) == 0 {
-		respondWithError(s, i, "ไม่พบการระบุผู้ใช้ในรูปแบบ @user กรุณาระบุผู้ใช้ในรูปแบบที่ถูกต้อง")
-		return
-	}
+		// Get Discord session
+		// Note: In a real implementation, you would need to access the Discord session
 
-	// Create a list of all users
-	var allUsers []string
-	for _, mention := range allUsersMentions {
-		allUsers = append(allUsers, mention[1])
-	}
+		// Process the bill allocation
+		successMsg, err := processBillAllocation(session, dummyInteraction, sessionData.BillData, itemAllocations, additionalItemsText, payload.PromptPayID)
+		if err != nil {
+			log.Printf("Error processing bill allocation from webhook: %v", err)
+			// Send error message to Discord channel
+			session.ChannelMessageSend(sessionData.ChannelID, fmt.Sprintf("⚠️ เกิดข้อผิดพลาดในการสร้างบิลจากเว็บไซต์: %v", err))
+			return
+		}
 
-	// Parse item allocations from the text
+		// Send success message to Discord channel
+		session.ChannelMessageSend(sessionData.ChannelID, successMsg)
+
+		// Clean up the data
+		delete(billOCRDataStore, strings.Split(payload.Token, "_")[0])
+		delete(tempSelectedUsers, strings.Split(payload.Token, "_")[0])
+		delete(webSessionTokens, payload.Token)
+	}()
+
+	// Respond with success
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok","message":"Bill allocation is being processed"}`))
+}
+
+// processItemAllocations processes the item allocations text and returns a map of item index to user IDs
+func processItemAllocations(itemsAllocationText string, allUsers []string, billData *ocr.ExtractBillTextResponse) map[int][]string {
 	itemAllocations := make(map[int][]string) // Map of item index to list of user IDs
 
 	// Parse each line of the items allocation text
@@ -375,31 +526,7 @@ func handleBillAllocateModalSubmit(s *discordgo.Session, i *discordgo.Interactio
 		}
 	}
 
-	// Acknowledge the modal submission
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "กำลังดำเนินการสร้างบิล...",
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
-	})
-
-	// Process the bill and create transactions
-	successMsg, err := processBillAllocation(s, i, billData, itemAllocations, additionalItemsText, promptPayID)
-	if err != nil {
-		s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Content: fmt.Sprintf("⚠️ เกิดข้อผิดพลาดในการสร้างบิล: %v", err),
-		})
-		return
-	}
-
-	// Send a success message
-	s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: successMsg,
-	})
-
-	// Clean up the bill data from memory
-	delete(billOCRDataStore, messageID)
+	return itemAllocations
 }
 
 // processBillAllocation creates transactions based on the bill allocation
