@@ -37,7 +37,9 @@ func main() {
 		viper.GetString("Firebase.SiteNamePrefix"),
 	)
 	log.Printf("Firebase client initialized for project: %s", viper.GetString("Firebase.MainProjectID"))
-	_ = fbClient // Using the client to avoid unused variable warning
+
+	// Set the Firebase client in the discord package
+	discord.SetFirebaseClient(fbClient)
 
 	// Initialize Slip Verifier client
 	verifierClient := verifier.NewClient(

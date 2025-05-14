@@ -2,6 +2,7 @@ package discord
 
 import (
 	"fmt"
+	"github.com/oatsaysai/billing-in-discord/pkg/firebase"
 	"log"
 	"os"
 	"regexp"
@@ -26,7 +27,13 @@ var (
 	txIDsRegex       = regexp.MustCompile(`\(TxIDs:\s?([\d,]+)\)`)
 	verifierClient   *verifier.Client
 	ocrClient        *ocr.Client
+	firebaseClient   *firebase.Client
 )
+
+// SetFirebaseClient sets the Firebase client
+func SetFirebaseClient(client *firebase.Client) {
+	firebaseClient = client
+}
 
 // SetOCRClient sets the OCR client
 func SetOCRClient(client *ocr.Client) {
