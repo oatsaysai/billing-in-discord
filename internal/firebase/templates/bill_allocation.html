@@ -256,6 +256,34 @@
         </div>
     </section>
 
+    <section aria-labelledby="additional-charges-heading" class="bg-white p-6 rounded-lg shadow-md mb-8">
+        <h2 id="additional-charges-heading" class="text-xl font-semibold mb-4 text-gray-800">ค่าบริการเพิ่มเติม</h2>
+        <div class="space-y-4">
+            <div class="flex items-center space-x-2">
+                <label class="inline-flex items-center cursor-pointer">
+                    <input type="checkbox" id="add-vat-checkbox" class="form-checkbox h-4 w-4 text-blue-600">
+                    <span class="ml-2 text-sm text-gray-700">เพิ่ม VAT 7%</span>
+                </label>
+                <div class="ml-4 text-sm text-gray-500" id="vat-amount">+0.00 บาท</div>
+            </div>
+            
+            <div class="flex items-center space-x-2">
+                <label class="inline-flex items-center cursor-pointer">
+                    <input type="checkbox" id="add-service-charge-checkbox" class="form-checkbox h-4 w-4 text-blue-600">
+                    <span class="ml-2 text-sm text-gray-700">เพิ่ม Service Charge 10%</span>
+                </label>
+                <div class="ml-4 text-sm text-gray-500" id="service-charge-amount">+0.00 บาท</div>
+            </div>
+
+            <div class="pt-2 border-t border-gray-200">
+                <div class="flex justify-between">
+                    <span class="font-medium">ยอดรวมทั้งหมด</span>
+                    <span class="font-bold" id="final-total-with-charges">0.00 บาท</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
     <button
             id="submit-btn"
             class="w-full px-6 py-3 bg-green-500 text-white text-lg font-semibold rounded-md hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-300 mb-4 transition">
@@ -309,6 +337,13 @@
     const errorDetailP = document.getElementById('error-detail');
     const toast = document.getElementById('toast');
     const toastMessage = document.getElementById('toast-message');
+    
+    // Additional charges controls
+    const addVatCheckbox = document.getElementById('add-vat-checkbox');
+    const addServiceChargeCheckbox = document.getElementById('add-service-charge-checkbox');
+    const vatAmountEl = document.getElementById('vat-amount');
+    const serviceChargeAmountEl = document.getElementById('service-charge-amount');
+    const finalTotalWithChargesEl = document.getElementById('final-total-with-charges');
 
     // Parse and store users data
     const USERS = JSON.parse(usersDataScript.textContent);
@@ -364,7 +399,42 @@
             const totalInput = row.querySelector('.item-total-amount');
             grandTotal += parseFloat(totalInput.value) || 0;
         });
+        
+        // Update the base total
         mainBillGrandTotalEl.textContent = grandTotal.toFixed(2);
+        
+        // Calculate and update additional charges
+        updateAdditionalCharges(grandTotal);
+    }
+    
+    /**
+     * Calculates and updates VAT, Service Charge, and final total
+     * @param {number} baseTotal - The base total amount before additional charges
+     */
+    function updateAdditionalCharges(baseTotal) {
+        const vatRate = 0.07; // 7%
+        const serviceChargeRate = 0.10; // 10%
+        
+        let finalTotal = baseTotal;
+        let vatAmount = 0;
+        let serviceChargeAmount = 0;
+        
+        // Calculate VAT if checked
+        if (addVatCheckbox.checked) {
+            vatAmount = baseTotal * vatRate;
+            finalTotal += vatAmount;
+        }
+        
+        // Calculate Service Charge if checked
+        if (addServiceChargeCheckbox.checked) {
+            serviceChargeAmount = baseTotal * serviceChargeRate;
+            finalTotal += serviceChargeAmount;
+        }
+        
+        // Update display elements
+        vatAmountEl.textContent = `+${vatAmount.toFixed(2)} บาท`;
+        serviceChargeAmountEl.textContent = `+${serviceChargeAmount.toFixed(2)} บาท`;
+        finalTotalWithChargesEl.textContent = `${finalTotal.toFixed(2)} บาท`;
     }
 
     /**
@@ -529,6 +599,10 @@
 
         // Get PromptPay ID
         const promptPayID = promptPayIdInput.value.trim();
+        
+        // Get additional charges
+        const addVat = addVatCheckbox.checked;
+        const addServiceCharge = addServiceChargeCheckbox.checked;
 
         // Validate overall form
         if (hasValidationErrors) {
@@ -543,7 +617,11 @@
         return {
             token: TOKEN,
             billItems,
-            promptPayID
+            promptPayID,
+            additionalCharges: {
+                addVat,
+                addServiceCharge
+            }
         };
     }
 
@@ -606,6 +684,17 @@
         if (target.classList.contains('item-total-amount')) {
             updateMainBillGrandTotal();
         }
+    });
+    
+    // Listen for checkbox changes for additional charges
+    addVatCheckbox.addEventListener('change', () => {
+        const baseTotal = parseFloat(mainBillGrandTotalEl.textContent) || 0;
+        updateAdditionalCharges(baseTotal);
+    });
+    
+    addServiceChargeCheckbox.addEventListener('change', () => {
+        const baseTotal = parseFloat(mainBillGrandTotalEl.textContent) || 0;
+        updateAdditionalCharges(baseTotal);
     });
 
     // Listen for remove item button clicks

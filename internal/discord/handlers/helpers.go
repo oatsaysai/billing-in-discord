@@ -21,7 +21,26 @@ var (
 	txIDsRegex       = regexp.MustCompile(`\(TxIDs:\s?([\d,]+)\)`)
 )
 
-// sendErrorMessage sends an error message to the specified Discord channel
+// SendDirectMessage sends a direct message to a user
+func SendDirectMessage(s *discordgo.Session, userID, message string) error {
+	// Create a DM channel with the user
+	channel, err := s.UserChannelCreate(userID)
+	if err != nil {
+		log.Printf("Could not create DM channel with %s: %v", userID, err)
+		return err
+	}
+
+	// Send the message
+	_, err = s.ChannelMessageSend(channel.ID, message)
+	if err != nil {
+		log.Printf("Failed to send DM to %s: %v", userID, err)
+		return err
+	}
+
+	return nil
+}
+
+// SendErrorMessage sends an error message to the specified Discord channel
 func SendErrorMessage(s *discordgo.Session, channelID, message string) {
 	log.Printf("ERROR to user (Channel: %s): %s", channelID, message)
 	_, err := s.ChannelMessageSend(channelID, fmt.Sprintf("⚠️ เกิดข้อผิดพลาด: %s", message))
@@ -84,9 +103,39 @@ func GenerateAndSendQrCode(s *discordgo.Session, channelID, promptPayNum string,
 		msgContent = fmt.Sprintf("<@%s> กรุณาชำระ %.2f บาท สำหรับ %s%s\nหากต้องการยืนยันการชำระเงิน ตอบกลับข้อความนี้พร้อมแนบสลิปของคุณ", targetUserDiscordID, amount, description, txIDString)
 	}
 
+	// Send to the channel
 	_, err = s.ChannelFileSendWithMessage(channelID, msgContent, filename, file)
 	if err != nil {
 		log.Printf("Failed to send QR file for %s: %v", targetUserDiscordID, err)
+	}
+
+	// Also send a direct message to the debtor
+	// We need to reopen the file as it was already read for the channel message
+	file.Close()
+	file, err = os.Open(filename)
+	if err != nil {
+		log.Printf("Could not reopen QR image for DM to %s: %v", targetUserDiscordID, err)
+		return
+	}
+	defer file.Close()
+
+	// Create a DM channel with the user
+	channel, err := s.UserChannelCreate(targetUserDiscordID)
+	if err != nil {
+		log.Printf("Could not create DM channel with %s: %v", targetUserDiscordID, err)
+		return
+	}
+
+	// Prepare the DM content (remove the mention since it's a direct message)
+	dmContent := fmt.Sprintf("กรุณาชำระ %.2f บาท %s\nหากต้องการยืนยันการชำระเงิน ตอบกลับข้อความนี้พร้อมแนบสลิปของคุณ", amount, txIDString)
+	if description != "" {
+		dmContent = fmt.Sprintf("กรุณาชำระ %.2f บาท สำหรับ %s%s\nหากต้องการยืนยันการชำระเงิน ตอบกลับข้อความนี้พร้อมแนบสลิปของคุณ", amount, description, txIDString)
+	}
+
+	// Send the DM with the QR code
+	_, err = s.ChannelFileSendWithMessage(channel.ID, dmContent, filename, file)
+	if err != nil {
+		log.Printf("Failed to send QR file via DM to %s: %v", targetUserDiscordID, err)
 	}
 }
 

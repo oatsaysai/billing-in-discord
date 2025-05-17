@@ -7,8 +7,12 @@ import (
 	"strings"
 	"time"
 
+	pp "github.com/Frontware/promptpay"
 	"github.com/bwmarrin/discordgo"
 	"github.com/oatsaysai/billing-in-discord/internal/db"
+	"github.com/yeqown/go-qrcode/v2"
+	"github.com/yeqown/go-qrcode/writer/standard"
+	"os"
 )
 
 // handlePayDebtButton handles the pay debt button interaction
@@ -84,9 +88,60 @@ func handlePayDebtButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		content.WriteString(unpaidTxDetails)
 	}
 
-	content.WriteString("\nโปรดแนบสลิปการโอนเงินเพื่อยืนยันการชำระหนี้")
+	// Generate QR code if PromptPay ID is available
+	if promptPayID != "ไม่พบข้อมูล" {
+		// Create a file name for the QR code
+		filename := fmt.Sprintf("qr_%s_%d.jpg", creditorDiscordID, time.Now().UnixNano())
 
-	// Respond with a modal and a message
+		// Generate QR code
+		payment := pp.PromptPay{PromptPayID: promptPayID, Amount: totalDebtAmount}
+		qrcodeStr, err := payment.Gen()
+		if err != nil {
+			log.Printf("Error generating PromptPay string for creditor %s: %v", creditorDiscordID, err)
+		} else {
+			qrc, err := qrcode.New(qrcodeStr)
+			if err != nil {
+				log.Printf("Error creating QR code for creditor %s: %v", creditorDiscordID, err)
+			} else {
+				fileWriter, err := standard.New(filename)
+				if err != nil {
+					log.Printf("Error creating file writer for QR: %v", err)
+				} else {
+					if err = qrc.Save(fileWriter); err != nil {
+						log.Printf("Error saving QR image: %v", err)
+						os.Remove(filename) // Clean up
+					} else {
+						// QR code successfully generated, now send it as a DM
+						file, err := os.Open(filename)
+						if err != nil {
+							log.Printf("Error opening QR file: %v", err)
+						} else {
+							defer file.Close()
+							defer os.Remove(filename) // Clean up after sending
+
+							// Create DM channel
+							channel, err := s.UserChannelCreate(debtorDiscordID)
+							if err != nil {
+								log.Printf("Error creating DM channel: %v", err)
+							} else {
+								dmContent := fmt.Sprintf("**QR Code สำหรับชำระเงิน %.2f บาท ให้กับ <@%s>**\n\n**PromptPay ID:** `%s`",
+									totalDebtAmount, creditorDiscordID, promptPayID)
+
+								_, err = s.ChannelFileSendWithMessage(channel.ID, dmContent, filename, file)
+								if err != nil {
+									log.Printf("Error sending QR in DM: %v", err)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	content.WriteString("\nคุณสามารถยืนยันการชำระเงินด้วยสลิป หรือขอให้เจ้าหนี้ยืนยันการชำระด้วยตนเองได้")
+
+	// Respond with a message and two buttons
 	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -96,9 +151,14 @@ func handlePayDebtButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				discordgo.ActionsRow{
 					Components: []discordgo.MessageComponent{
 						discordgo.Button{
-							Label:    "ฉันได้โอนเงินแล้ว",
+							Label:    "ยืนยันการชำระเงินด้วยสลิป",
 							Style:    discordgo.SuccessButton,
 							CustomID: fmt.Sprintf("confirm_payment_%s_%s", creditorDiscordID, txIDsString),
+						},
+						discordgo.Button{
+							Label:    "ยืนยันการชำระเงินโดยไม่มีสลิป",
+							Style:    discordgo.PrimaryButton,
+							CustomID: fmt.Sprintf("confirm_payment_no_slip_%s_%s", creditorDiscordID, txIDsString),
 						},
 					},
 				},
@@ -415,7 +475,7 @@ func handleRequestPaymentButton(s *discordgo.Session, i *discordgo.InteractionCr
 	GenerateAndSendQrCode(s, i.ChannelID, promptPayID, totalDebtAmount, debtorDiscordID, description, unpaidTxIDs)
 
 	// Send a confirmation message to the creditor (person who requested the payment)
-	followUpMessage(s, i, fmt.Sprintf("ได้ส่งคำขอชำระเงิน %.2f บาท ไปยัง <@%s> แล้ว", totalDebtAmount, debtorDiscordID))
+	followUpMessage(s, i, fmt.Sprintf("ได้ส่งคำขอชำระเงิน %.2f บาท ไปยัง <@%s> แล้ว และได้ส่ง QR code ไปทางข้อความส่วนตัวด้วย", totalDebtAmount, debtorDiscordID))
 }
 
 // handleConfirmPaymentButton handles the confirmation of payment button
@@ -455,6 +515,286 @@ func handleConfirmPaymentButton(s *discordgo.Session, i *discordgo.InteractionCr
 
 	if err != nil {
 		log.Printf("Error responding to confirm payment button: %v", err)
+	}
+}
+
+// handleConfirmPaymentNoSlipButton handles the confirmation of payment without slip button
+func handleConfirmPaymentNoSlipButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Extract the creditor's Discord ID and TxIDs from the custom ID
+	customID := i.MessageComponentData().CustomID
+	parts := strings.SplitN(strings.TrimPrefix(customID, confirmPaymentNoSlipPrefix), "_", 2)
+
+	if len(parts) != 2 {
+		respondWithError(s, i, "รูปแบบ ID ไม่ถูกต้อง")
+		return
+	}
+
+	creditorDiscordID := parts[0]
+	txIDsString := parts[1]
+
+	if creditorDiscordID == "" {
+		respondWithError(s, i, "ไม่พบข้อมูลผู้รับเงินที่ถูกต้อง")
+		return
+	}
+
+	debtorDiscordID := i.Member.User.ID
+
+	// Get DB IDs
+	debtorDbID, err := db.GetOrCreateUser(debtorDiscordID)
+	if err != nil {
+		respondWithError(s, i, "ไม่สามารถดึงข้อมูลผู้ใช้ได้")
+		return
+	}
+
+	creditorDbID, err := db.GetOrCreateUser(creditorDiscordID)
+	if err != nil {
+		respondWithError(s, i, "ไม่สามารถดึงข้อมูลผู้รับเงินได้")
+		return
+	}
+
+	// Get total debt amount
+	totalDebtAmount, err := db.GetTotalDebtAmount(debtorDbID, creditorDbID)
+	if err != nil {
+		respondWithError(s, i, "ไม่สามารถดึงข้อมูลยอดหนี้รวมได้")
+		return
+	}
+
+	// First respond to the interaction
+	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: fmt.Sprintf("กำลังส่งคำขอยืนยันการชำระเงิน %.2f บาท ไปยัง <@%s> โปรดรอการยืนยันจากผู้รับเงิน", totalDebtAmount, creditorDiscordID),
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+
+	if err != nil {
+		log.Printf("Error responding to confirm payment no slip button: %v", err)
+		return
+	}
+
+	// Create a DM channel with the creditor
+	creditorChannel, err := s.UserChannelCreate(creditorDiscordID)
+	if err != nil {
+		log.Printf("Could not create DM channel with creditor %s: %v", creditorDiscordID, err)
+		followUpError(s, i, "ไม่สามารถส่งข้อความไปยังผู้รับเงินได้")
+		return
+	}
+
+	// Get debtor's name
+	debtorName := GetDiscordUsername(s, debtorDiscordID)
+
+	// Send DM to creditor with confirmation buttons
+	verificationMessage := fmt.Sprintf("<@%s> (**%s**) แจ้งว่าได้ชำระเงิน **%.2f บาท** ให้คุณแล้ว โดยไม่มีสลิปการโอนเงิน\n\nกรุณายืนยันว่าคุณได้รับเงินจำนวนนี้แล้วจริงๆ",
+		debtorDiscordID, debtorName, totalDebtAmount)
+
+	// If we have TxIDs, include them in the content for reference
+	if txIDsString != "ไม่พบรายการ" {
+		verificationMessage += fmt.Sprintf("\n(เกี่ยวข้องกับรายการ TxIDs: %s)", txIDsString)
+	}
+
+	// Create unique custom IDs for the verification buttons that include both user IDs and transaction IDs
+	confirmButtonID := fmt.Sprintf("verify_payment_confirm_%s_%s_%s", debtorDiscordID, creditorDiscordID, txIDsString)
+	rejectButtonID := fmt.Sprintf("verify_payment_reject_%s_%s_%s", debtorDiscordID, creditorDiscordID, txIDsString)
+
+	// Send DM to creditor with buttons
+	_, err = s.ChannelMessageSendComplex(creditorChannel.ID, &discordgo.MessageSend{
+		Content: verificationMessage,
+		Components: []discordgo.MessageComponent{
+			discordgo.ActionsRow{
+				Components: []discordgo.MessageComponent{
+					discordgo.Button{
+						Label:    "ยืนยัน ฉันได้รับเงินแล้ว",
+						Style:    discordgo.SuccessButton,
+						CustomID: confirmButtonID,
+					},
+					discordgo.Button{
+						Label:    "ปฏิเสธ ฉันยังไม่ได้รับเงิน",
+						Style:    discordgo.DangerButton,
+						CustomID: rejectButtonID,
+					},
+				},
+			},
+		},
+	})
+
+	if err != nil {
+		log.Printf("Error sending verification message to creditor: %v", err)
+		followUpError(s, i, "ไม่สามารถส่งคำขอยืนยันไปยังผู้รับเงินได้")
+		return
+	}
+
+	// Also send a notification in the channel where the interaction happened if it's not a DM
+	if !strings.HasPrefix(i.ChannelID, "@me") {
+		// This is a public channel, send a confirmation message
+		s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("<@%s> ได้แจ้งว่าชำระเงิน %.2f บาท ให้กับ <@%s> แล้ว และกำลังรอการยืนยันจากผู้รับเงิน",
+			debtorDiscordID, totalDebtAmount, creditorDiscordID))
+	}
+}
+
+// handleVerifyPaymentConfirmButton handles the confirmation of payment verification button
+func handleVerifyPaymentConfirmButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Extract the debtor's Discord ID, creditor's Discord ID, and TxIDs from the custom ID
+	customID := i.MessageComponentData().CustomID
+	parts := strings.SplitN(strings.TrimPrefix(customID, verifyPaymentConfirmPrefix), "_", 3)
+
+	if len(parts) != 3 {
+		respondWithError(s, i, "รูปแบบ ID ไม่ถูกต้อง")
+		return
+	}
+
+	debtorDiscordID := parts[0]
+	creditorDiscordID := parts[1]
+	txIDsString := parts[2]
+
+	creditorUserID := i.Member.User.ID
+
+	// Verify that the creditor is actually the person clicking the button
+	if creditorUserID != creditorDiscordID {
+		respondWithError(s, i, "คุณไม่มีสิทธิ์ยืนยันการชำระเงินนี้")
+		return
+	}
+
+	// Get DB IDs
+	debtorDbID, err := db.GetOrCreateUser(debtorDiscordID)
+	if err != nil {
+		respondWithError(s, i, "ไม่สามารถดึงข้อมูลลูกหนี้ได้")
+		return
+	}
+
+	creditorDbID, err := db.GetOrCreateUser(creditorDiscordID)
+	if err != nil {
+		respondWithError(s, i, "ไม่สามารถดึงข้อมูลเจ้าหนี้ได้")
+		return
+	}
+
+	// Get total debt amount
+	totalDebtAmount, err := db.GetTotalDebtAmount(debtorDbID, creditorDbID)
+	if err != nil {
+		respondWithError(s, i, "ไม่สามารถดึงข้อมูลยอดหนี้รวมได้")
+		return
+	}
+
+	// Update transaction records if specific TxIDs were provided
+	var txIDs []int
+	if txIDsString != "ไม่พบรายการ" && txIDsString != "[]" {
+		// Try to parse the TxIDs string (format like "[1, 2, 3]")
+		idStr := strings.Trim(txIDsString, "[]")
+		idParts := strings.Split(idStr, ",")
+
+		for _, part := range idParts {
+			// Trim spaces and convert to int
+			trimmed := strings.TrimSpace(part)
+			id, err := strconv.Atoi(trimmed)
+			if err != nil {
+				log.Printf("Error parsing TxID '%s': %v", trimmed, err)
+				continue
+			}
+			txIDs = append(txIDs, id)
+		}
+	}
+
+	if len(txIDs) > 0 {
+		// Mark specific transactions as paid
+		for _, txID := range txIDs {
+			err := db.MarkTransactionPaidAndUpdateDebt(txID)
+			if err != nil {
+				log.Printf("Error marking transaction %d as paid: %v", txID, err)
+				// Continue with other transactions
+			}
+		}
+	} else {
+		// If no specific transactions were provided, just reduce the debt by the total amount
+		err = db.ReduceDebtFromPayment(debtorDiscordID, creditorDiscordID, totalDebtAmount)
+		if err != nil {
+			log.Printf("Error reducing debt: %v", err)
+			respondWithError(s, i, "ไม่สามารถอัปเดตข้อมูลหนี้สินในระบบได้")
+			return
+		}
+	}
+
+	// Respond to the creditor with confirmation
+	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content: fmt.Sprintf("✅ คุณได้ยืนยันการรับชำระหนี้จำนวน %.2f บาท จาก <@%s> เรียบร้อยแล้ว ระบบได้อัปเดตข้อมูลหนี้สินแล้ว",
+				totalDebtAmount, debtorDiscordID),
+			Components: []discordgo.MessageComponent{}, // Remove buttons
+		},
+	})
+
+	if err != nil {
+		log.Printf("Error responding to verification button: %v", err)
+	}
+
+	// Notify the debtor via DM
+	debtorChannel, err := s.UserChannelCreate(debtorDiscordID)
+	if err != nil {
+		log.Printf("Could not create DM channel with debtor %s: %v", debtorDiscordID, err)
+	} else {
+		//debtorName := GetDiscordUsername(s, debtorDiscordID)
+		creditorName := GetDiscordUsername(s, creditorDiscordID)
+
+		_, err = s.ChannelMessageSend(debtorChannel.ID, fmt.Sprintf("✅ <@%s> (**%s**) ได้ยืนยันการรับชำระหนี้จำนวน %.2f บาท จากคุณเรียบร้อยแล้ว ระบบได้อัปเดตข้อมูลหนี้สินแล้ว",
+			creditorDiscordID, creditorName, totalDebtAmount))
+
+		if err != nil {
+			log.Printf("Error sending DM to debtor: %v", err)
+		}
+	}
+}
+
+// handleVerifyPaymentRejectButton handles the rejection of payment verification button
+func handleVerifyPaymentRejectButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Extract the debtor's Discord ID, creditor's Discord ID, and TxIDs from the custom ID
+	customID := i.MessageComponentData().CustomID
+	parts := strings.SplitN(strings.TrimPrefix(customID, verifyPaymentRejectPrefix), "_", 3)
+
+	if len(parts) != 3 {
+		respondWithError(s, i, "รูปแบบ ID ไม่ถูกต้อง")
+		return
+	}
+
+	debtorDiscordID := parts[0]
+	creditorDiscordID := parts[1]
+
+	creditorUserID := i.Member.User.ID
+
+	// Verify that the creditor is actually the person clicking the button
+	if creditorUserID != creditorDiscordID {
+		respondWithError(s, i, "คุณไม่มีสิทธิ์ยืนยันการชำระเงินนี้")
+		return
+	}
+
+	// Get names for the notification messages
+	debtorName := GetDiscordUsername(s, debtorDiscordID)
+	creditorName := GetDiscordUsername(s, creditorDiscordID)
+
+	// Respond to the creditor with confirmation
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content: fmt.Sprintf("❌ คุณได้ปฏิเสธการยืนยันรับชำระหนี้จาก <@%s> (**%s**) ไม่มีการเปลี่ยนแปลงข้อมูลในระบบ",
+				debtorDiscordID, debtorName),
+			Components: []discordgo.MessageComponent{}, // Remove buttons
+		},
+	})
+
+	if err != nil {
+		log.Printf("Error responding to verification reject button: %v", err)
+	}
+
+	// Notify the debtor via DM
+	debtorChannel, err := s.UserChannelCreate(debtorDiscordID)
+	if err != nil {
+		log.Printf("Could not create DM channel with debtor %s: %v", debtorDiscordID, err)
+	} else {
+		_, err = s.ChannelMessageSend(debtorChannel.ID, fmt.Sprintf("❌ <@%s> (**%s**) ได้ปฏิเสธการยืนยันรับชำระหนี้จากคุณ โปรดติดต่อเจ้าหนี้โดยตรงเพื่อตรวจสอบการชำระเงิน",
+			creditorDiscordID, creditorName))
+
+		if err != nil {
+			log.Printf("Error sending DM to debtor: %v", err)
+		}
 	}
 }
 
@@ -601,6 +941,81 @@ func handleBillCancelButton(s *discordgo.Session, i *discordgo.InteractionCreate
 
 	if err != nil {
 		log.Printf("Error responding to bill cancel button: %v", err)
+	}
+}
+
+// handleMarkPaidButton handles the mark-paid button interaction
+func handleMarkPaidButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Extract transaction ID from the custom ID
+	customID := i.MessageComponentData().CustomID
+	txIDStr := strings.TrimPrefix(customID, markPaidButtonPrefix)
+
+	txID, err := strconv.Atoi(txIDStr)
+	if err != nil {
+		respondWithError(s, i, "รหัสรายการไม่ถูกต้อง")
+		return
+	}
+
+	// Verify that the current user is actually the creditor
+	userID := i.Member.User.ID
+
+	// Get the transaction details
+	txInfo, err := db.GetTransactionInfo(txID)
+	if err != nil {
+		respondWithError(s, i, fmt.Sprintf("ไม่พบข้อมูลรายการ TxID %d", txID))
+		return
+	}
+
+	// Check if the transaction is already paid
+	isPaid := txInfo["already_paid"].(bool)
+	if isPaid {
+		respondWithError(s, i, fmt.Sprintf("รายการ TxID %d ถูกทำเครื่องหมายว่าชำระแล้ว", txID))
+		return
+	}
+
+	// Verify that the user is the creditor
+	payeeDbID := txInfo["payee_id"].(int)
+	payeeDiscordID, err := db.GetDiscordIDFromDbID(payeeDbID)
+	if err != nil {
+		respondWithError(s, i, "ไม่สามารถยืนยันตัวตนของผู้รับเงินได้")
+		return
+	}
+
+	if userID != payeeDiscordID {
+		respondWithError(s, i, "คุณไม่มีสิทธิ์ทำเครื่องหมายว่ารายการนี้ชำระแล้ว (คุณไม่ใช่ผู้รับเงิน)")
+		return
+	}
+
+	// Mark the transaction as paid
+	err = db.MarkTransactionPaidAndUpdateDebt(txID)
+	if err != nil {
+		respondWithError(s, i, fmt.Sprintf("ไม่สามารถทำเครื่องหมายว่ารายการ TxID %d ชำระแล้ว: %v", txID, err))
+		return
+	}
+
+	// Get debtor's Discord ID for notification
+	payerDbID := txInfo["payer_id"].(int)
+	payerDiscordID, err := db.GetDiscordIDFromDbID(payerDbID)
+	if err != nil {
+		log.Printf("Warning: Could not get debtor's Discord ID for notification: %v", err)
+		// Continue even if this fails
+	} else {
+		// Send a DM to the debtor if we got their ID
+		SendDirectMessage(s, payerDiscordID, fmt.Sprintf("รายการชำระเงิน TxID %d จำนวน %.2f บาท ถูกทำเครื่องหมายว่าชำระแล้วโดย <@%s>",
+			txID, txInfo["amount"].(float64), userID))
+	}
+
+	// Respond with a success message
+	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: fmt.Sprintf("✅ ทำเครื่องหมายว่ารายการ TxID %d ชำระแล้วเรียบร้อย!", txID),
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+
+	if err != nil {
+		log.Printf("Error responding to mark paid button: %v", err)
 	}
 }
 

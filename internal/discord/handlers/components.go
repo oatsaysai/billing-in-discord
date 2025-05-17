@@ -14,6 +14,9 @@ const (
 	requestPaymentButtonPrefix = "request_payment_"
 	markPaidButtonPrefix       = "mark_paid_"
 	confirmPaymentButtonPrefix = "confirm_payment_"
+	confirmPaymentNoSlipPrefix = "confirm_payment_no_slip_"
+	verifyPaymentConfirmPrefix = "verify_payment_confirm_"
+	verifyPaymentRejectPrefix  = "verify_payment_reject_"
 	billAllocateButtonPrefix   = "bill_allocate_"
 	billSkipButtonPrefix       = "bill_skip_"
 	billCancelButtonID         = "bill_cancel"
@@ -47,6 +50,12 @@ func handleMessageComponentInteraction(s *discordgo.Session, i *discordgo.Intera
 		handleMarkPaidButton(s, i)
 	case strings.HasPrefix(customID, confirmPaymentButtonPrefix):
 		handleConfirmPaymentButton(s, i)
+	case strings.HasPrefix(customID, confirmPaymentNoSlipPrefix):
+		handleConfirmPaymentNoSlipButton(s, i)
+	case strings.HasPrefix(customID, verifyPaymentConfirmPrefix):
+		handleVerifyPaymentConfirmButton(s, i)
+	case strings.HasPrefix(customID, verifyPaymentRejectPrefix):
+		handleVerifyPaymentRejectButton(s, i)
 	case customID == debtDropdownID:
 		handleDebtDropdown(s, i)
 	case strings.HasPrefix(customID, billAllocateButtonPrefix):
