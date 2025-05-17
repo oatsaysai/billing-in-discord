@@ -523,57 +523,6 @@ func getDiscordSession() *discordgo.Session {
 	return session
 }
 
-// processItemAllocations processes the item allocations text and returns a map of item index to user IDs
-func processItemAllocations(itemsAllocationText string, allUsers []string, billData *ocr.ExtractBillTextResponse) map[int][]string {
-	itemAllocations := make(map[int][]string) // Map of item index to list of user IDs
-
-	// Parse each line of the items allocation text
-	if itemsAllocationText != "" {
-		lines := strings.Split(itemsAllocationText, "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" || !strings.ContainsAny(line, "123456789") {
-				continue // Skip empty lines or lines without numbers
-			}
-
-			// Try to extract the item number from the beginning of the line
-			parts := strings.Fields(line)
-			if len(parts) < 2 {
-				continue
-			}
-
-			// First part should be the item number
-			itemNumStr := parts[0]
-			itemNum, err := strconv.Atoi(itemNumStr)
-			if err != nil {
-				continue // Not a valid item number
-			}
-
-			// Adjust item number to 0-based index
-			itemIdx := itemNum - 1
-			if itemIdx < 0 || itemIdx >= len(billData.Items) {
-				continue // Invalid item index
-			}
-
-			// Check if there are user mentions in the line
-			mentions := userMentionRegex.FindAllStringSubmatch(line, -1)
-			if len(mentions) > 0 {
-				// Add the mentioned users to the item
-				var userIDs []string
-				for _, mention := range mentions {
-					userIDs = append(userIDs, mention[1])
-				}
-				itemAllocations[itemIdx] = userIDs
-			} else if strings.Contains(strings.ToLower(line), "all") {
-				// If the line contains "all", allocate to all users
-				itemAllocations[itemIdx] = []string{"all"}
-			}
-		}
-	}
-
-	return itemAllocations
-}
-
 // processBillAllocation creates transactions based on the bill allocation
 func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate, billData *ocr.ExtractBillTextResponse,
 	itemAllocations map[int][]string, promptPayID string) (string, error) {
@@ -609,13 +558,6 @@ func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate,
 		}
 	}
 
-	// Process additional items
-	var additionalItems []struct {
-		description string
-		amount      float64
-		users       []string
-	}
-
 	// Check if there are any users mentioned
 	if len(allUsers) == 0 {
 		return "", fmt.Errorf("ไม่มีผู้ใช้ถูกระบุในรายการใดๆ")
@@ -637,7 +579,7 @@ func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate,
 
 	totalBillAmount := 0.0
 
-	// Process bill items
+	// Process bill items - รวบรวมยอดเงินที่แต่ละคนต้องจ่ายโดยไม่บันทึกเป็นรายการย่อย
 	for idx, item := range billData.Items {
 		// Skip items that are not allocated to anyone
 		users, allocated := itemAllocations[idx]
@@ -653,9 +595,6 @@ func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate,
 			users = allUsersList
 		}
 
-		// Create transaction description
-		description := fmt.Sprintf("%s (x%d) จาก %s", item.Name, item.Quantity, billData.MerchantName)
-
 		// Calculate amount per person
 		amountPerPerson := itemTotal / float64(len(users))
 		if amountPerPerson < 0.01 {
@@ -664,79 +603,55 @@ func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate,
 		}
 
 		// Format the item summary
+		description := fmt.Sprintf("%s (x%d) จาก %s", item.Name, item.Quantity, billData.MerchantName)
 		billItemsSummary.WriteString(fmt.Sprintf("- `%.2f` สำหรับ **%s**, หารกับ: ", itemTotal, description))
 		for _, uid := range users {
 			billItemsSummary.WriteString(fmt.Sprintf("<@%s> ", uid))
 		}
 		billItemsSummary.WriteString("\n")
 
-		// Create transaction for each user
+		// บันทึกจำนวนเงินที่แต่ละคนต้องจ่ายลงในแผนที่ (map) แทนที่จะบันทึกลงฐานข้อมูลเลย
 		for _, payerDiscordID := range users {
-			payerDbID, dbErr := db.GetOrCreateUser(payerDiscordID)
-			if dbErr != nil {
-				log.Printf("Error DB user %s for item '%s': %v", payerDiscordID, description, dbErr)
-				continue // Skip this specific payer for this item
+			// ข้ามการบันทึกรายการถ้าเจ้าของบิล (ผู้ออกเงินไปก่อน) เป็นคนเดียวกับผู้จ่าย
+			if payerDiscordID == payeeDiscordID {
+				log.Printf("Skipping transaction for bill owner (self-payment) for item '%s'", description)
+				continue
 			}
 
-			txID, txErr := db.CreateTransaction(payerDbID, payeeDbID, amountPerPerson, description)
-			if txErr != nil {
-				log.Printf("Failed to save transaction for user %s, item '%s': %v", payerDiscordID, description, txErr)
-				continue // Skip this specific payer for this item
-			}
-
+			// เพิ่มจำนวนเงินที่ต้องจ่ายเข้าไปในยอดรวม
 			userTotalDebts[payerDiscordID] += amountPerPerson
-			userTxIDs[payerDiscordID] = append(userTxIDs[payerDiscordID], txID)
-
-			// Update user_debts table
-			debtErr := db.UpdateUserDebt(payerDbID, payeeDbID, amountPerPerson)
-			if debtErr != nil {
-				log.Printf("Failed to update debt for user %s, item '%s': %v", payerDiscordID, description, debtErr)
-				// Continue anyway as transaction was saved
-			}
 		}
 	}
 
-	// Process additional items
-	for _, item := range additionalItems {
-		totalBillAmount += item.amount
-
-		// Calculate amount per person
-		amountPerPerson := item.amount / float64(len(item.users))
-		if amountPerPerson < 0.01 {
-			// Skip very small amounts to avoid dust
+	// บันทึกธุรกรรมเพียงครั้งเดียวต่อผู้ใช้ โดยรวมเป็นยอดรวมของบิล
+	for payerDiscordID, totalAmount := range userTotalDebts {
+		// ข้ามถ้าจำนวนเงินน้อยเกินไป
+		if totalAmount < 0.01 {
 			continue
 		}
 
-		// Format the item summary
-		billItemsSummary.WriteString(fmt.Sprintf("- `%.2f` สำหรับ **%s**, หารกับ: ", item.amount, item.description))
-		for _, uid := range item.users {
-			billItemsSummary.WriteString(fmt.Sprintf("<@%s> ", uid))
+		payerDbID, dbErr := db.GetOrCreateUser(payerDiscordID)
+		if dbErr != nil {
+			log.Printf("Error DB user %s: %v", payerDiscordID, dbErr)
+			continue
 		}
-		billItemsSummary.WriteString("\n")
 
-		// Create transaction for each user
-		for _, payerDiscordID := range item.users {
-			payerDbID, dbErr := db.GetOrCreateUser(payerDiscordID)
-			if dbErr != nil {
-				log.Printf("Error DB user %s for item '%s': %v", payerDiscordID, item.description, dbErr)
-				continue // Skip this specific payer for this item
-			}
+		// สร้างคำอธิบายรายการที่รวมเป็นบิลเดียว
+		description := fmt.Sprintf("รายการทั้งหมดจากบิล %s วันที่ %s", billData.MerchantName, billData.Datetime)
 
-			txID, txErr := db.CreateTransaction(payerDbID, payeeDbID, amountPerPerson, item.description)
-			if txErr != nil {
-				log.Printf("Failed to save transaction for user %s, item '%s': %v", payerDiscordID, item.description, txErr)
-				continue // Skip this specific payer for this item
-			}
+		txID, txErr := db.CreateTransaction(payerDbID, payeeDbID, totalAmount, description)
+		if txErr != nil {
+			log.Printf("Failed to save transaction for user %s: %v", payerDiscordID, txErr)
+			continue
+		}
 
-			userTotalDebts[payerDiscordID] += amountPerPerson
-			userTxIDs[payerDiscordID] = append(userTxIDs[payerDiscordID], txID)
+		userTxIDs[payerDiscordID] = []int{txID}
 
-			// Update user_debts table
-			debtErr := db.UpdateUserDebt(payerDbID, payeeDbID, amountPerPerson)
-			if debtErr != nil {
-				log.Printf("Failed to update debt for user %s, item '%s': %v", payerDiscordID, item.description, debtErr)
-				// Continue anyway as transaction was saved
-			}
+		// อัปเดตตาราง user_debts
+		debtErr := db.UpdateUserDebt(payerDbID, payeeDbID, totalAmount)
+		if debtErr != nil {
+			log.Printf("Failed to update debt for user %s: %v", payerDiscordID, debtErr)
+			// Continue anyway as transaction was saved
 		}
 	}
 
