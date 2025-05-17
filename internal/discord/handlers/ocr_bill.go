@@ -1,4 +1,4 @@
-package discord
+package handlers
 
 import (
 	"crypto/rand"
@@ -13,25 +13,39 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oatsaysai/billing-in-discord/pkg/ocr"
-
 	"github.com/bwmarrin/discordgo"
 	"github.com/oatsaysai/billing-in-discord/internal/db"
 	"github.com/oatsaysai/billing-in-discord/internal/firebase"
 	fbclient "github.com/oatsaysai/billing-in-discord/pkg/firebase"
+	"github.com/oatsaysai/billing-in-discord/pkg/ocr"
 )
 
-// handleOCRBillAttachment processes the bill image using OCR
-func handleOCRBillAttachment(s *discordgo.Session, m *discordgo.MessageCreate, attachment *discordgo.MessageAttachment) {
+var (
+	ocrClient      *ocr.Client
+	firebaseClient *fbclient.Client
+)
+
+// SetOCRClient sets the OCR client
+func SetOCRClient(client *ocr.Client) {
+	ocrClient = client
+}
+
+// SetFirebaseClient sets the Firebase client
+func SetFirebaseClient(client *fbclient.Client) {
+	firebaseClient = client
+}
+
+// HandleOCRBillAttachment processes the bill image using OCR
+func HandleOCRBillAttachment(s *discordgo.Session, m *discordgo.MessageCreate, attachment *discordgo.MessageAttachment) {
 	// Check if OCR client is configured
 	if ocrClient == nil {
-		sendErrorMessage(s, m.ChannelID, "OCR service is not configured. OCR bill processing is not available.")
+		SendErrorMessage(s, m.ChannelID, "OCR service is not configured. OCR bill processing is not available.")
 		return
 	}
 
 	// Check if it's an image file
 	if !strings.HasPrefix(strings.ToLower(attachment.ContentType), "image/") {
-		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("ไฟล์ที่แนบมาไม่ใช่รูปภาพ (%s)", attachment.ContentType))
+		SendErrorMessage(s, m.ChannelID, fmt.Sprintf("ไฟล์ที่แนบมาไม่ใช่รูปภาพ (%s)", attachment.ContentType))
 		return
 	}
 
@@ -39,7 +53,7 @@ func handleOCRBillAttachment(s *discordgo.Session, m *discordgo.MessageCreate, a
 	tmpFile := fmt.Sprintf("bill_%s_%d.png", m.ID, time.Now().UnixNano())
 	err := downloadFile(tmpFile, attachment.URL)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, "ไม่สามารถดาวน์โหลดไฟล์รูปภาพบิลได้")
+		SendErrorMessage(s, m.ChannelID, "ไม่สามารถดาวน์โหลดไฟล์รูปภาพบิลได้")
 		log.Printf("OCRBill: Failed to download bill image %s: %v", attachment.URL, err)
 		return
 	}
@@ -55,7 +69,7 @@ func handleOCRBillAttachment(s *discordgo.Session, m *discordgo.MessageCreate, a
 	// Process the image with OCR
 	billData, err := ocrClient.ExtractBillText(tmpFile)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("การประมวลผล OCR ล้มเหลว: %v", err))
+		SendErrorMessage(s, m.ChannelID, fmt.Sprintf("การประมวลผล OCR ล้มเหลว: %v", err))
 		log.Printf("OCRBill: OCR processing failed for %s: %v", attachment.URL, err)
 		// Clean up the processing message
 		if processingMsg != nil {
@@ -113,7 +127,7 @@ func handleOCRBillAttachment(s *discordgo.Session, m *discordgo.MessageCreate, a
 	})
 	if err != nil {
 		log.Printf("OCRBill: Failed to send bill OCR results: %v", err)
-		sendErrorMessage(s, m.ChannelID, "ไม่สามารถส่งผลการวิเคราะห์บิลได้")
+		SendErrorMessage(s, m.ChannelID, "ไม่สามารถส่งผลการวิเคราะห์บิลได้")
 	}
 
 	// Clean up the processing message
@@ -326,15 +340,14 @@ func createBillWebsite(s *discordgo.Session, i *discordgo.InteractionCreate, mes
 		CreatedAt:     time.Now(),
 	}
 
-	// Get the Firebase client from the discord package
-	fbClient := getFirebaseClient()
-	if fbClient == nil {
+	// Check if Firebase client is available
+	if firebaseClient == nil {
 		sendFollowupError(s, i, "Firebase client ไม่ได้ถูกกำหนดค่า")
 		return
 	}
 
 	// Deploy the website using the Firebase client
-	websiteURL, err := firebase.DeployBillWebsite(fbClient, token, billData.MerchantName, webItems, webUsers)
+	websiteURL, err := firebase.DeployBillWebsite(firebaseClient, token, billData.MerchantName, webItems, webUsers)
 	if err != nil {
 		log.Printf("Error deploying bill website: %v", err)
 		sendFollowupError(s, i, fmt.Sprintf("เกิดข้อผิดพลาดในการสร้างเว็บไซต์: %v", err))
@@ -356,11 +369,6 @@ func generateToken() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return base64.URLEncoding.EncodeToString(b)
-}
-
-// getFirebaseClient returns the Firebase client
-func getFirebaseClient() *fbclient.Client {
-	return firebaseClient
 }
 
 // stringPtr returns a pointer to the given string
@@ -450,6 +458,16 @@ func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Get Discord session from global variable
+	var discordSession *discordgo.Session
+	if s := getDiscordSession(); s != nil {
+		discordSession = s
+	} else {
+		http.Error(w, "Discord session not available", http.StatusInternalServerError)
+		log.Printf("Discord session not available for webhook processing")
+		return
+	}
+
 	// Process the bill allocation asynchronously
 	go func() {
 		// Create a dummy interaction for processBillAllocation
@@ -464,20 +482,17 @@ func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 
-		// Get Discord session
-		// Note: In a real implementation, you would need to access the Discord session
-
 		// Process the bill allocation
-		successMsg, err := processBillAllocation(session, dummyInteraction, sessionData.BillData, itemAllocations, additionalItemsText, payload.PromptPayID)
+		successMsg, err := processBillAllocation(discordSession, dummyInteraction, sessionData.BillData, itemAllocations, additionalItemsText, payload.PromptPayID)
 		if err != nil {
 			log.Printf("Error processing bill allocation from webhook: %v", err)
 			// Send error message to Discord channel
-			session.ChannelMessageSend(sessionData.ChannelID, fmt.Sprintf("⚠️ เกิดข้อผิดพลาดในการสร้างบิลจากเว็บไซต์: %v", err))
+			discordSession.ChannelMessageSend(sessionData.ChannelID, fmt.Sprintf("⚠️ เกิดข้อผิดพลาดในการสร้างบิลจากเว็บไซต์: %v", err))
 			return
 		}
 
 		// Send success message to Discord channel
-		session.ChannelMessageSend(sessionData.ChannelID, successMsg)
+		discordSession.ChannelMessageSend(sessionData.ChannelID, successMsg)
 
 		// Clean up the data
 		delete(billOCRDataStore, strings.Split(payload.Token, "_")[0])
@@ -489,6 +504,13 @@ func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok","message":"Bill allocation is being processed"}`))
+}
+
+// getDiscordSession gets the Discord session from the package-level variable
+func getDiscordSession() *discordgo.Session {
+	// This should be provided by the discord package's GetSession function
+	// Import it from the discord package
+	return nil // This needs to be properly implemented to get the session from discord.GetSession()
 }
 
 // processItemAllocations processes the item allocations text and returns a map of item index to user IDs
@@ -798,7 +820,7 @@ func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate,
 		for payerDiscordID, totalOwed := range userTotalDebts {
 			if promptPayID != "" && totalOwed > 0.009 { // Only send QR if ID provided and amount is significant
 				relevantTxIDs := userTxIDs[payerDiscordID]
-				generateAndSendQrCode(s, i.ChannelID, promptPayID, totalOwed, payerDiscordID,
+				GenerateAndSendQrCode(s, i.ChannelID, promptPayID, totalOwed, payerDiscordID,
 					fmt.Sprintf("ยอดรวมจากบิล %s โดย <@%s>", billData.MerchantName, payeeDiscordID), relevantTxIDs)
 			}
 		}

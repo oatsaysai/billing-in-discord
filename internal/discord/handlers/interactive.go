@@ -1,4 +1,4 @@
-package discord
+package handlers
 
 import (
 	"fmt"
@@ -10,18 +10,18 @@ import (
 )
 
 // HandleInteractiveMyDebts shows debts with interactive UI
-func HandleInteractiveMyDebts(s *discordgo.Session, m *discordgo.MessageCreate) {
+func HandleInteractiveMyDebts(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	userID := m.Author.ID
 	userDbID, err := db.GetOrCreateUser(userID)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลผู้ใช้ได้")
+		SendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลผู้ใช้ได้")
 		return
 	}
 
 	// Get debts
 	debts, err := db.GetUserDebtsWithDetails(userDbID, true)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลหนี้สินได้")
+		SendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลหนี้สินได้")
 		return
 	}
 
@@ -84,18 +84,18 @@ func HandleInteractiveMyDebts(s *discordgo.Session, m *discordgo.MessageCreate) 
 }
 
 // HandleInteractiveOwedToMe shows dues with interactive UI
-func HandleInteractiveOwedToMe(s *discordgo.Session, m *discordgo.MessageCreate) {
+func HandleInteractiveOwedToMe(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	userID := m.Author.ID
 	userDbID, err := db.GetOrCreateUser(userID)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลผู้ใช้ได้")
+		SendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลผู้ใช้ได้")
 		return
 	}
 
 	// Get debts (as creditor, not debtor)
 	debts, err := db.GetUserDebtsWithDetails(userDbID, false)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลยอดค้างชำระได้")
+		SendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลยอดค้างชำระได้")
 		return
 	}
 
@@ -135,7 +135,7 @@ func HandleInteractiveOwedToMe(s *discordgo.Session, m *discordgo.MessageCreate)
 				discordgo.Button{
 					Label:    fmt.Sprintf("ดูรายละเอียดที่ %s ค้างชำระ", displayName),
 					Style:    discordgo.SecondaryButton,
-					CustomID: fmt.Sprintf("view_dues_%s", debt.OtherPartyDiscordID),
+					CustomID: fmt.Sprintf("view_detail_%s", debt.OtherPartyDiscordID),
 				},
 				discordgo.Button{
 					Label:    fmt.Sprintf("ส่งคำขอชำระเงินไปยัง %s", displayName),
@@ -157,9 +157,8 @@ func HandleInteractiveOwedToMe(s *discordgo.Session, m *discordgo.MessageCreate)
 }
 
 // HandleSelectTransaction displays a selection UI for transactions
-func HandleSelectTransaction(s *discordgo.Session, m *discordgo.MessageCreate) {
+func HandleSelectTransaction(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	// Parse command arguments: !selecttx [filter]
-	args := strings.Fields(m.Content)
 	var filter string
 	if len(args) > 1 {
 		filter = strings.ToLower(args[1])
@@ -168,7 +167,7 @@ func HandleSelectTransaction(s *discordgo.Session, m *discordgo.MessageCreate) {
 	userID := m.Author.ID
 	userDbID, err := db.GetOrCreateUser(userID)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลผู้ใช้ได้")
+		SendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลผู้ใช้ได้")
 		return
 	}
 
@@ -190,7 +189,7 @@ func HandleSelectTransaction(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลรายการได้")
+		SendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลรายการได้")
 		return
 	}
 
@@ -289,11 +288,10 @@ func HandleSelectTransaction(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 // HandleInteractiveRequestPayment displays an interactive payment request UI
-func HandleInteractiveRequestPayment(s *discordgo.Session, m *discordgo.MessageCreate) {
+func HandleInteractiveRequestPayment(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	// Parse command: !request @user
-	args := strings.Fields(m.Content)
 	if len(args) < 2 || !userMentionRegex.MatchString(args[1]) {
-		sendErrorMessage(s, m.ChannelID, "รูปแบบคำสั่งไม่ถูกต้อง โปรดใช้: `!irequest @ลูกหนี้`")
+		SendErrorMessage(s, m.ChannelID, "รูปแบบคำสั่งไม่ถูกต้อง โปรดใช้: `!irequest @ลูกหนี้`")
 		return
 	}
 
@@ -307,20 +305,20 @@ func HandleInteractiveRequestPayment(s *discordgo.Session, m *discordgo.MessageC
 	// Get DB IDs
 	creditorDbID, err := db.GetOrCreateUser(creditorDiscordID)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลผู้ใช้ได้")
+		SendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลผู้ใช้ได้")
 		return
 	}
 
 	debtorDbID, err := db.GetOrCreateUser(debtorDiscordID)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, fmt.Sprintf("ไม่สามารถดึงข้อมูลลูกหนี้ <@%s> ได้", debtorDiscordID))
+		SendErrorMessage(s, m.ChannelID, fmt.Sprintf("ไม่สามารถดึงข้อมูลลูกหนี้ <@%s> ได้", debtorDiscordID))
 		return
 	}
 
 	// Get total debt amount
 	totalDebtAmount, err := db.GetTotalDebtAmount(debtorDbID, creditorDbID)
 	if err != nil {
-		sendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลยอดหนี้รวมได้")
+		SendErrorMessage(s, m.ChannelID, "ไม่สามารถดึงข้อมูลยอดหนี้รวมได้")
 		return
 	}
 
@@ -383,7 +381,7 @@ func HandleInteractiveRequestPayment(s *discordgo.Session, m *discordgo.MessageC
 		}
 
 		// Then generate QR code
-		generateAndSendQrCode(s, m.ChannelID, promptPayID, totalDebtAmount, debtorDiscordID,
+		GenerateAndSendQrCode(s, m.ChannelID, promptPayID, totalDebtAmount, debtorDiscordID,
 			fmt.Sprintf("คำร้องขอชำระหนี้คงค้างจาก <@%s>", creditorDiscordID), unpaidTxIDs)
 	} else {
 		// Just send the message without QR code
