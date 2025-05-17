@@ -356,14 +356,14 @@ func HandleInteractiveRequestPayment(s *discordgo.Session, m *discordgo.MessageC
 	components = append(components, discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
 			discordgo.Button{
-				Label:    "ชำระเงินทั้งหมด",
+				Label:    "ส่งคำขอชำระเงิน",
 				Style:    discordgo.PrimaryButton,
-				CustomID: fmt.Sprintf("%s%s", payDebtButtonPrefix, creditorDiscordID),
+				CustomID: fmt.Sprintf("%s%s", requestPaymentButtonPrefix, debtorDiscordID),
 			},
 			discordgo.Button{
 				Label:    "ดูรายละเอียดเพิ่มเติม",
 				Style:    discordgo.SecondaryButton,
-				CustomID: fmt.Sprintf("%s%s", viewDetailButtonPrefix, creditorDiscordID),
+				CustomID: fmt.Sprintf("%sd%s", viewDetailButtonPrefix, debtorDiscordID),
 			},
 		},
 	})
