@@ -14,6 +14,7 @@ type Config struct {
 	Firebase   FirebaseConfig
 	PostgreSQL PostgreSQLConfig
 	OCR        OCRConfig
+	Server     ServerConfig
 }
 
 // DiscordBotConfig holds Discord bot configuration
@@ -27,6 +28,7 @@ type FirebaseConfig struct {
 	ServiceAccountKeyPath string
 	SiteNamePrefix        string
 	CliPath               string
+	WebhookURL            string
 }
 
 // PostgreSQLConfig holds database configuration
@@ -44,6 +46,11 @@ type PostgreSQLConfig struct {
 type OCRConfig struct {
 	ApiUrl string
 	ApiKey string
+}
+
+// ServerConfig holds HTTP server configuration
+type ServerConfig struct {
+	Port string
 }
 
 // Load loads configuration from file and environment variables
@@ -106,6 +113,9 @@ func Initialize() {
 
 	viper.SetDefault("Firebase.CliPath", "firebase")
 	viper.SetDefault("Firebase.SiteNamePrefix", "psweb")
+	viper.SetDefault("Firebase.WebhookURL", "/api/bill-webhook")
+
+	viper.SetDefault("Server.Port", "8080")
 
 	// Load configuration
 	if err := viper.ReadInConfig(); err != nil {

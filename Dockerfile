@@ -34,5 +34,9 @@ WORKDIR /app
 # Copy the application binary
 COPY --from=builder /build/app ./app
 COPY config.yaml ./config.yaml
+COPY internal/firebase/templates/ ./internal/firebase/templates/
+
+# Expose port for HTTP server
+EXPOSE 8080
 
 ENTRYPOINT [ "./app" ]

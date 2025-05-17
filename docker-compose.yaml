@@ -4,9 +4,12 @@ services:
     image: image-registry.fintblock.com/billing-bot
     container_name: billing-bot
     restart: unless-stopped
+    ports:
+      - "8080:8080"
     volumes:
       - ./firebase.json:/app/service-account.json:ro
       - ./config.yaml:/app/config.yaml:ro
+      - ./internal/firebase/templates:/app/internal/firebase/templates:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json
       - TZ=Asia/Bangkok

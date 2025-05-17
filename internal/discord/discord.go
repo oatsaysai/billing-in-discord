@@ -49,6 +49,9 @@ func Initialize(token string) error {
 		return fmt.Errorf("error creating Discord session: %w", err)
 	}
 
+	// Set session in handlers package
+	handlers.SetDiscordSession(session)
+
 	// Update the registry with all commands
 	UpdateRegistry()
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/oatsaysai/billing-in-discord/internal/config"
 	"github.com/oatsaysai/billing-in-discord/internal/db"
 	"github.com/oatsaysai/billing-in-discord/internal/firebase"
 	fbclient "github.com/oatsaysai/billing-in-discord/pkg/firebase"
@@ -23,6 +24,7 @@ import (
 var (
 	ocrClient      *ocr.Client
 	firebaseClient *fbclient.Client
+	session        *discordgo.Session // Add Discord session variable
 )
 
 // SetOCRClient sets the OCR client
@@ -33,6 +35,11 @@ func SetOCRClient(client *ocr.Client) {
 // SetFirebaseClient sets the Firebase client
 func SetFirebaseClient(client *fbclient.Client) {
 	firebaseClient = client
+}
+
+// SetDiscordSession sets the Discord session
+func SetDiscordSession(s *discordgo.Session) {
+	session = s
 }
 
 // HandleOCRBillAttachment processes the bill image using OCR
@@ -346,8 +353,14 @@ func createBillWebsite(s *discordgo.Session, i *discordgo.InteractionCreate, mes
 		return
 	}
 
+	// Get webhook URL from configuration
+	webhookURL := config.GetString("Firebase.WebhookURL")
+	if webhookURL == "" {
+		webhookURL = "/api/bill-webhook" // Fallback default
+	}
+
 	// Deploy the website using the Firebase client
-	websiteURL, err := firebase.DeployBillWebsite(firebaseClient, token, billData.MerchantName, webItems, webUsers)
+	websiteURL, err := firebase.DeployBillWebsite(firebaseClient, token, billData.MerchantName, webhookURL, webItems, webUsers)
 	if err != nil {
 		log.Printf("Error deploying bill website: %v", err)
 		sendFollowupError(s, i, fmt.Sprintf("เกิดข้อผิดพลาดในการสร้างเว็บไซต์: %v", err))
@@ -391,6 +404,17 @@ func sendFollowupError(s *discordgo.Session, i *discordgo.InteractionCreate, err
 
 // HandleBillWebhookCallback processes callbacks from the bill allocation website
 func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
+	// Set CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*") // หรือระบุโดเมนเฉพาะ
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// Handle preflight request
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -406,10 +430,16 @@ func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Parse the JSON payload
 	var payload struct {
-		Token           string                   `json:"token"`
-		ItemAllocations map[string][]string      `json:"itemAllocations"` // Key is item index as string
-		AdditionalItems []map[string]interface{} `json:"additionalItems"`
-		PromptPayID     string                   `json:"promptPayID"`
+		Token     string `json:"token"`
+		BillItems []struct {
+			OriginalId   string   `json:"originalId"`
+			ClientSideId string   `json:"clientSideId"`
+			Name         string   `json:"name"`
+			TotalAmount  float64  `json:"totalAmount"`
+			Users        []string `json:"users"`
+			IsNew        bool     `json:"isNew"`
+		} `json:"billItems"`
+		PromptPayID string `json:"promptPayID"`
 	}
 
 	err = json.Unmarshal(body, &payload)
@@ -429,33 +459,14 @@ func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Convert string indices to integers in itemAllocations
 	itemAllocations := make(map[int][]string)
-	for itemIdxStr, users := range payload.ItemAllocations {
-		itemIdx, err := strconv.Atoi(itemIdxStr)
+	for _, item := range payload.BillItems {
+		itemIdx, err := strconv.Atoi(item.ClientSideId)
 		if err != nil {
 			// Skip invalid indices
-			log.Printf("Invalid item index in webhook payload: %s", itemIdxStr)
+			log.Printf("Invalid item index in webhook payload: %d", itemIdx)
 			continue
 		}
-		itemAllocations[itemIdx] = users
-	}
-
-	// Convert additionalItems to the format expected by processBillAllocation
-	additionalItemsText := ""
-	for _, item := range payload.AdditionalItems {
-		if desc, ok := item["description"].(string); ok {
-			if amount, ok := item["amount"].(float64); ok {
-				if users, ok := item["users"].([]interface{}); ok {
-					// Format: "<description> <amount> @user1 @user2..."
-					line := fmt.Sprintf("%s %v", desc, amount)
-					for _, user := range users {
-						if userID, ok := user.(string); ok {
-							line += fmt.Sprintf(" <@%s>", userID)
-						}
-					}
-					additionalItemsText += line + "\n"
-				}
-			}
-		}
+		itemAllocations[itemIdx-1] = item.Users
 	}
 
 	// Get Discord session from global variable
@@ -483,7 +494,7 @@ func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Process the bill allocation
-		successMsg, err := processBillAllocation(discordSession, dummyInteraction, sessionData.BillData, itemAllocations, additionalItemsText, payload.PromptPayID)
+		successMsg, err := processBillAllocation(discordSession, dummyInteraction, sessionData.BillData, itemAllocations, payload.PromptPayID)
 		if err != nil {
 			log.Printf("Error processing bill allocation from webhook: %v", err)
 			// Send error message to Discord channel
@@ -508,9 +519,8 @@ func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
 
 // getDiscordSession gets the Discord session from the package-level variable
 func getDiscordSession() *discordgo.Session {
-	// This should be provided by the discord package's GetSession function
-	// Import it from the discord package
-	return nil // This needs to be properly implemented to get the session from discord.GetSession()
+	// Use the session from the package-level variable in handlers
+	return session
 }
 
 // processItemAllocations processes the item allocations text and returns a map of item index to user IDs
@@ -566,7 +576,7 @@ func processItemAllocations(itemsAllocationText string, allUsers []string, billD
 
 // processBillAllocation creates transactions based on the bill allocation
 func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate, billData *ocr.ExtractBillTextResponse,
-	itemAllocations map[int][]string, additionalItemsText string, promptPayID string) (string, error) {
+	itemAllocations map[int][]string, promptPayID string) (string, error) {
 
 	payeeDiscordID := i.Member.User.ID
 	payeeDbID, err := db.GetOrCreateUser(payeeDiscordID)
@@ -604,79 +614,6 @@ func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate,
 		description string
 		amount      float64
 		users       []string
-	}
-
-	if additionalItemsText != "" {
-		lines := strings.Split(additionalItemsText, "\n")
-		for _, line := range lines {
-			if line = strings.TrimSpace(line); line == "" {
-				continue
-			}
-
-			// Try to parse the line in the format: "<description> <amount> @user1 @user2..."
-			parts := strings.Fields(line)
-			if len(parts) < 3 {
-				continue // Not enough parts to be valid
-			}
-
-			// The last part that's not a user mention should be the amount
-			var amount float64
-			var description string
-			var users []string
-			var amountIndex int
-
-			// Find the first user mention in the line
-			firstMentionIndex := -1
-			for i, part := range parts {
-				if userMentionRegex.MatchString(part) {
-					firstMentionIndex = i
-					break
-				}
-			}
-
-			// If no user mentions found, skip this line
-			if firstMentionIndex == -1 {
-				continue
-			}
-
-			// Try to parse the part before the user mention as an amount
-			amountIndex = firstMentionIndex - 1
-			if amountIndex < 0 {
-				continue
-			}
-
-			amountStr := parts[amountIndex]
-			parsedAmount, err := strconv.ParseFloat(amountStr, 64)
-			if err != nil {
-				continue // The part is not a valid number
-			}
-			amount = parsedAmount
-
-			// Everything before the amount is the description
-			description = strings.Join(parts[:amountIndex], " ")
-
-			// Collect all user mentions
-			for i := firstMentionIndex; i < len(parts); i++ {
-				if userMentionRegex.MatchString(parts[i]) {
-					userID := userMentionRegex.FindStringSubmatch(parts[i])[1]
-					users = append(users, userID)
-					allUsers[userID] = true
-				}
-			}
-
-			// If we successfully parsed amount and found users, add to the list
-			if amount > 0 && len(users) > 0 {
-				additionalItems = append(additionalItems, struct {
-					description string
-					amount      float64
-					users       []string
-				}{
-					description: description,
-					amount:      amount,
-					users:       users,
-				})
-			}
-		}
 	}
 
 	// Check if there are any users mentioned
