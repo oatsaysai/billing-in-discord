@@ -62,7 +62,7 @@ func HandleInteractiveMyDebts(s *discordgo.Session, m *discordgo.MessageCreate, 
 				discordgo.Button{
 					Label:    fmt.Sprintf("ดูรายละเอียดหนี้ให้ %s", displayName),
 					Style:    discordgo.SecondaryButton,
-					CustomID: fmt.Sprintf("%s%s", viewDetailButtonPrefix, debt.OtherPartyDiscordID),
+					CustomID: fmt.Sprintf("%sc%s", viewDetailButtonPrefix, debt.OtherPartyDiscordID),
 				},
 				discordgo.Button{
 					Label:    fmt.Sprintf("ชำระเงินให้ %s", displayName),
@@ -135,7 +135,7 @@ func HandleInteractiveOwedToMe(s *discordgo.Session, m *discordgo.MessageCreate,
 				discordgo.Button{
 					Label:    fmt.Sprintf("ดูรายละเอียดที่ %s ค้างชำระ", displayName),
 					Style:    discordgo.SecondaryButton,
-					CustomID: fmt.Sprintf("view_detail_%s", debt.OtherPartyDiscordID),
+					CustomID: fmt.Sprintf("view_detail_d%s", debt.OtherPartyDiscordID),
 				},
 				discordgo.Button{
 					Label:    fmt.Sprintf("ส่งคำขอชำระเงินไปยัง %s", displayName),

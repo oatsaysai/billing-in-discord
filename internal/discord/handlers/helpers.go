@@ -79,9 +79,9 @@ func GenerateAndSendQrCode(s *discordgo.Session, channelID, promptPayNum string,
 		txIDString = fmt.Sprintf(" (TxIDs: %s)", strings.Join(idStrs, ","))
 	}
 
-	msgContent := fmt.Sprintf("<@%s> กรุณาชำระ %.2f บาท สำหรับ \"%s\"%s\nหากต้องการยืนยันการชำระเงิน ตอบกลับข้อความนี้พร้อมแนบสลิปของคุณ", targetUserDiscordID, amount, description, txIDString)
-	if description == "" {
-		msgContent = fmt.Sprintf("<@%s> กรุณาชำระ %.2f บาท%s\nหากต้องการยืนยันการชำระเงิน ตอบกลับข้อความนี้พร้อมแนบสลิปของคุณ", targetUserDiscordID, amount, txIDString)
+	msgContent := fmt.Sprintf("<@%s> กรุณาชำระ %.2f บาท %s\nหากต้องการยืนยันการชำระเงิน ตอบกลับข้อความนี้พร้อมแนบสลิปของคุณ", targetUserDiscordID, amount, txIDString)
+	if description != "" {
+		msgContent = fmt.Sprintf("<@%s> กรุณาชำระ %.2f บาท สำหรับ %s%s\nหากต้องการยืนยันการชำระเงิน ตอบกลับข้อความนี้พร้อมแนบสลิปของคุณ", targetUserDiscordID, amount, description, txIDString)
 	}
 
 	_, err = s.ChannelFileSendWithMessage(channelID, msgContent, filename, file)

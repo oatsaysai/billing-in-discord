@@ -163,23 +163,43 @@ func handleViewDetailButton(s *discordgo.Session, i *discordgo.InteractionCreate
 			txID, payerDiscordID, payeeDiscordID, amount, description, created, status)
 
 	} else {
-		// General debt detail
-		creditorID := targetID
-		debtorID := i.Member.User.ID
+		// ตรวจสอบว่าเป็นการดูเงินที่คนอื่นค้างเรา หรือเราค้างคนอื่น
+		// ด้วยการดูตัวแรกของ targetID - ถ้ามี "c" นำหน้า แสดงว่าเป็นการดูเงินที่เราค้างคนอื่น
+		// ถ้ามี "d" นำหน้า แสดงว่าเป็นการดูเงินที่คนอื่นค้างเรา
+
+		var debtorID, creditorID string
+		var isOwed bool = false // เราเป็นเจ้าหนี้หรือไม่ (คนอื่นเป็นหนี้เรา)
+
+		if strings.HasPrefix(targetID, "c") {
+			// รูปแบบ "c123456789" - เราเป็นลูกหนี้ คนอื่นเป็นเจ้าหนี้
+			creditorID = strings.TrimPrefix(targetID, "c")
+			debtorID = i.Member.User.ID
+			isOwed = false
+		} else if strings.HasPrefix(targetID, "d") {
+			// รูปแบบ "d123456789" - เราเป็นเจ้าหนี้ คนอื่นเป็นลูกหนี้
+			debtorID = strings.TrimPrefix(targetID, "d")
+			creditorID = i.Member.User.ID
+			isOwed = true
+		} else {
+			// รูปแบบเดิมเพื่อความเข้ากันได้กับโค้ดเก่า
+			creditorID = targetID
+			debtorID = i.Member.User.ID
+			isOwed = false
+		}
 
 		debtorDbID, err := db.GetOrCreateUser(debtorID)
 		if err != nil {
-			respondWithError(s, i, "ไม่สามารถระบุตัวตนของคุณในระบบ")
+			respondWithError(s, i, "ไม่สามารถระบุตัวตนของลูกหนี้ในระบบ")
 			return
 		}
 
 		creditorDbID, err := db.GetOrCreateUser(creditorID)
 		if err != nil {
-			respondWithError(s, i, "ไม่สามารถระบุเจ้าหนี้ในระบบ")
+			respondWithError(s, i, "ไม่สามารถระบุตัวตนของเจ้าหนี้ในระบบ")
 			return
 		}
 
-		// Get recent unpaid transactions
+		// Get recent unpaid transactions - ส่ง debtorDbID และ creditorDbID ให้ถูกต้อง
 		txs, err := db.GetRecentTransactions(debtorDbID, creditorDbID, 5, false)
 		if err != nil {
 			respondWithError(s, i, fmt.Sprintf("ไม่สามารถดึงข้อมูลรายการล่าสุดได้: %v", err))
@@ -193,10 +213,20 @@ func handleViewDetailButton(s *discordgo.Session, i *discordgo.InteractionCreate
 			return
 		}
 
-		detailsMessage = fmt.Sprintf("**รายละเอียดหนี้ถึง <@%s>**\n"+
-			"ยอดรวมทั้งหมด: %.2f บาท\n\n"+
-			"รายการค้างชำระล่าสุด (แสดง 5 รายการ):\n",
-			creditorID, totalDebt)
+		// ปรับข้อความตามกรณี
+		if isOwed {
+			// แสดงว่าคนอื่นเป็นหนี้เรา
+			detailsMessage = fmt.Sprintf("**รายละเอียดหนี้ที่ <@%s> ค้างชำระให้คุณ**\n"+
+				"ยอดรวมทั้งหมด: %.2f บาท\n\n"+
+				"รายการค้างชำระล่าสุด (แสดง 5 รายการ):\n",
+				debtorID, totalDebt)
+		} else {
+			// แสดงว่าเราเป็นหนี้คนอื่น
+			detailsMessage = fmt.Sprintf("**รายละเอียดหนี้ที่คุณค้างชำระให้ <@%s>**\n"+
+				"ยอดรวมทั้งหมด: %.2f บาท\n\n"+
+				"รายการค้างชำระล่าสุด (แสดง 5 รายการ):\n",
+				creditorID, totalDebt)
+		}
 
 		if len(txs) == 0 {
 			detailsMessage += "ไม่พบรายการค้างชำระล่าสุด"
@@ -220,36 +250,86 @@ func handleViewDetailButton(s *discordgo.Session, i *discordgo.InteractionCreate
 		if err == nil {
 			isPaid := txInfo["already_paid"].(bool)
 			payeeDbID := txInfo["payee_id"].(int)
+			payerDbID := txInfo["payer_id"].(int)
 			payeeDiscordID, _ := db.GetDiscordIDFromDbID(payeeDbID)
+			payerDiscordID, _ := db.GetDiscordIDFromDbID(payerDbID)
 
-			components = append(components, discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Label:    "ชำระเงิน",
-						Style:    discordgo.PrimaryButton,
-						CustomID: fmt.Sprintf("%s%s", payDebtButtonPrefix, targetID),
-						Disabled: isPaid,
-					},
-					discordgo.Button{
-						Label:    "ทำเครื่องหมายว่าชำระแล้ว",
-						Style:    discordgo.SuccessButton,
-						CustomID: fmt.Sprintf("%s%s", markPaidButtonPrefix, targetID),
-						Disabled: isPaid || i.Member.User.ID != payeeDiscordID, // Only payee can mark as paid
-					},
-				},
-			})
-		}
-	} else {
-		// General debt buttons
-		components = append(components, discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{
-				discordgo.Button{
+			currentUserID := i.Member.User.ID
+			var actionButtons []discordgo.MessageComponent
+
+			if currentUserID == payerDiscordID && !isPaid {
+				// ลูกหนี้เห็นปุ่มชำระเงิน
+				actionButtons = append(actionButtons, discordgo.Button{
 					Label:    "ชำระเงิน",
 					Style:    discordgo.PrimaryButton,
-					CustomID: fmt.Sprintf("%s%s", payDebtButtonPrefix, targetID),
-				},
-			},
-		})
+					CustomID: fmt.Sprintf("%s%s", payDebtButtonPrefix, payeeDiscordID),
+					Disabled: isPaid,
+				})
+			}
+
+			if currentUserID == payeeDiscordID && !isPaid {
+				// เจ้าหนี้เห็นปุ่มทำเครื่องหมายว่าชำระแล้ว และขอชำระเงิน
+				actionButtons = append(actionButtons, discordgo.Button{
+					Label:    "ทำเครื่องหมายว่าชำระแล้ว",
+					Style:    discordgo.SuccessButton,
+					CustomID: fmt.Sprintf("%s%s", markPaidButtonPrefix, txIDStr),
+				})
+				actionButtons = append(actionButtons, discordgo.Button{
+					Label:    "ขอชำระเงิน",
+					Style:    discordgo.PrimaryButton,
+					CustomID: fmt.Sprintf("%s%s", requestPaymentButtonPrefix, payerDiscordID),
+				})
+			}
+
+			if len(actionButtons) > 0 {
+				components = append(components, discordgo.ActionsRow{
+					Components: actionButtons,
+				})
+			}
+		}
+	} else {
+		// ตรวจสอบว่าเป็นลูกหนี้หรือเจ้าหนี้จาก targetID
+		var actionButtons []discordgo.MessageComponent
+		var debtorDiscordID, creditorDiscordID string
+
+		if strings.HasPrefix(targetID, "c") {
+			// เราเป็นลูกหนี้ คนอื่นเป็นเจ้าหนี้
+			creditorDiscordID = strings.TrimPrefix(targetID, "c")
+			debtorDiscordID = i.Member.User.ID
+
+			// ลูกหนี้เห็นปุ่มชำระเงิน
+			actionButtons = append(actionButtons, discordgo.Button{
+				Label:    "ชำระเงิน",
+				Style:    discordgo.PrimaryButton,
+				CustomID: fmt.Sprintf("%s%s", payDebtButtonPrefix, creditorDiscordID),
+			})
+		} else if strings.HasPrefix(targetID, "d") {
+			// เราเป็นเจ้าหนี้ คนอื่นเป็นลูกหนี้
+			debtorDiscordID = strings.TrimPrefix(targetID, "d")
+			creditorDiscordID = i.Member.User.ID
+
+			// เจ้าหนี้เห็นปุ่มขอชำระเงิน
+			actionButtons = append(actionButtons, discordgo.Button{
+				Label:    "ขอชำระเงิน",
+				Style:    discordgo.PrimaryButton,
+				CustomID: fmt.Sprintf("%s%s", requestPaymentButtonPrefix, debtorDiscordID),
+			})
+		} else {
+			// รูปแบบเดิมเพื่อความเข้ากันได้กับโค้ดเก่า
+			creditorDiscordID = targetID
+			debtorDiscordID = i.Member.User.ID
+			actionButtons = append(actionButtons, discordgo.Button{
+				Label:    "ชำระเงิน",
+				Style:    discordgo.PrimaryButton,
+				CustomID: fmt.Sprintf("%s%s", payDebtButtonPrefix, creditorDiscordID),
+			})
+		}
+
+		if len(actionButtons) > 0 {
+			components = append(components, discordgo.ActionsRow{
+				Components: actionButtons,
+			})
+		}
 	}
 
 	// Respond with the details message and buttons
@@ -329,28 +409,13 @@ func handleRequestPaymentButton(s *discordgo.Session, i *discordgo.InteractionCr
 		return
 	}
 
-	// Generate QR code and send to DM
-	dmChannel, err := s.UserChannelCreate(i.Member.User.ID)
-	if err != nil {
-		log.Printf("Error creating DM channel: %v", err)
-		followUpError(s, i, "ไม่สามารถส่งข้อความส่วนตัวถึงคุณได้ กรุณาเปิดการรับข้อความส่วนตัวจากสมาชิกในเซิร์ฟเวอร์")
-		return
-	}
+	// Generate QR code and send to the channel where the interaction happened
+	// This way, the debtor can see the payment request
+	description := fmt.Sprintf("ชำระหนี้ให้ <@%s>", creditorDiscordID)
+	GenerateAndSendQrCode(s, i.ChannelID, promptPayID, totalDebtAmount, debtorDiscordID, description, unpaidTxIDs)
 
-	description := fmt.Sprintf("คำร้องขอชำระหนี้คงค้างไปยัง <@%s>", debtorDiscordID)
-	GenerateAndSendQrCode(s, dmChannel.ID, promptPayID, totalDebtAmount, debtorDiscordID, description, unpaidTxIDs)
-
-	// Send a public message in the channel
-	publicMessage := fmt.Sprintf("<@%s> ได้ส่งคำขอชำระเงิน %.2f บาท ไปยัง <@%s> แล้ว",
-		creditorDiscordID, totalDebtAmount, debtorDiscordID)
-
-	_, err = s.ChannelMessageSend(i.ChannelID, publicMessage)
-	if err != nil {
-		log.Printf("Error sending public message: %v", err)
-	}
-
-	// Send a follow-up to the interaction confirming the QR was sent to DM
-	followUpMessage(s, i, "ส่ง QR Code ไปยังข้อความส่วนตัวของคุณแล้ว")
+	// Send a confirmation message to the creditor (person who requested the payment)
+	followUpMessage(s, i, fmt.Sprintf("ได้ส่งคำขอชำระเงิน %.2f บาท ไปยัง <@%s> แล้ว", totalDebtAmount, debtorDiscordID))
 }
 
 // handleConfirmPaymentButton handles the confirmation of payment button
