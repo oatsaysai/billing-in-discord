@@ -1,14 +1,29 @@
 DiscordBot:
-  Token: ""
+  Token: "YOUR_DISCORD_BOT_TOKEN"
+
+Firebase:
+  MainProjectID: "your-firebase-project-id"
+  ServiceAccountKeyPath: ""
+  SiteNamePrefix: "your-site-prefix"
+  CliPath: "firebase"
+  WebhookURL: "https://example.com/api/bill-webhook"
 
 PostgreSQL:
-  Host: "localhost"
+    #  Host: "localhost"
+  Host: "your-db-host"
   Port: 5432
-  User: "postgres"
-  Password: "postgres"
-  DBName: "billing-db"
+  User: "your-db-user"
+  Password: "your-db-password"
+  DBName: "your-db-name"
   Schema: "public"
   PoolMaxConns: 10
 
-Firebase:
-  MainProjectID: "xxxxx"
+SlipVerifier:
+  ApiUrl: "https://api.example.com/slip/"
+
+OCR:
+  ApiUrl: "https://api.example.com/ocr/"
+  ApiKey: "YOUR_OCR_API_KEY"
+
+Server:
+  Port: "8080"
