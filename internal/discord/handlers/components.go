@@ -10,6 +10,7 @@ import (
 // Component Custom IDs - shared constants for all interactive components
 const (
 	payDebtButtonPrefix        = "pay_debt_"
+	payTxButtonPrefix          = "pay_tx_"
 	viewDetailButtonPrefix     = "view_detail_"
 	requestPaymentButtonPrefix = "request_payment_"
 	markPaidButtonPrefix       = "mark_paid_"
@@ -42,6 +43,8 @@ func handleMessageComponentInteraction(s *discordgo.Session, i *discordgo.Intera
 	switch {
 	case strings.HasPrefix(customID, payDebtButtonPrefix):
 		handlePayDebtButton(s, i)
+	case strings.HasPrefix(customID, payTxButtonPrefix):
+		handlePayTxButton(s, i)
 	case strings.HasPrefix(customID, viewDetailButtonPrefix):
 		handleViewDetailButton(s, i)
 	case strings.HasPrefix(customID, requestPaymentButtonPrefix):

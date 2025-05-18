@@ -271,9 +271,13 @@ func HandleSelectTransaction(s *discordgo.Session, m *discordgo.MessageCreate, a
 		Options:     options,
 	}
 
-	// Send message with dropdown
+	// ส่งข้อความให้เห็นเฉพาะคนเรียกคำสั่ง
+	// สร้างข้อความตอบกลับที่มี mention ผู้ใช้เพื่อให้เห็นการแจ้งเตือน
+	replyContent := fmt.Sprintf("<@%s> **รายการของคุณ:**\n\n%s", m.Author.ID, content)
+
+	// เตรียมข้อความตอบกลับและ dropdown
 	_, err = s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
-		Content: content,
+		Content: replyContent,
 		Components: []discordgo.MessageComponent{
 			discordgo.ActionsRow{
 				Components: []discordgo.MessageComponent{
@@ -281,10 +285,30 @@ func HandleSelectTransaction(s *discordgo.Session, m *discordgo.MessageCreate, a
 				},
 			},
 		},
+		// กำหนด MessageReference เพื่อทำให้เป็นการตอบกลับโดยตรงต่อข้อความที่เรียกคำสั่ง
+		Reference: &discordgo.MessageReference{
+			MessageID: m.ID,
+			ChannelID: m.ChannelID,
+			GuildID:   m.GuildID,
+		},
 	})
+
 	if err != nil {
 		log.Printf("Error sending transaction selection menu: %v", err)
+		return
 	}
+
+	// เนื่องจากไม่สามารถใช้ ephemeral flag ได้โดยตรงกับคำสั่ง text command
+	// เราจะใช้วิธีการลบข้อความหลังจากเวลาผ่านไปสักครู่เพื่อไม่ให้รกช่อง
+	// แต่ในที่นี้ เราจะไม่ลบเพื่อให้ผู้ใช้สามารถมองเห็นและใช้งาน dropdown ได้
+
+	// คุณสามารถเพิ่มการลบข้อความอัตโนมัติโดยใช้ goroutine และ timer ได้ถ้าต้องการ ตัวอย่างเช่น:
+	/*
+		go func() {
+			time.Sleep(5 * time.Minute) // รอ 5 นาทีก่อนลบข้อความ
+			s.ChannelMessageDelete(m.ChannelID, msg.ID)
+		}()
+	*/
 }
 
 // HandleInteractiveRequestPayment displays an interactive payment request UI
