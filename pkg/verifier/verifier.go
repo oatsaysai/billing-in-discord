@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -59,14 +58,8 @@ func (c *Client) VerifySlip(amount float64, imgPath string) (*VerifySlipResponse
 		return nil, fmt.Errorf("VerifySlip: failed to marshal JSON: %w", err)
 	}
 
-	// Fix potential double slash in URL
-	baseURL := c.APIURL
-	if strings.HasSuffix(baseURL, "/") {
-		baseURL = strings.TrimSuffix(baseURL, "/")
-	}
-
-	// URL for slip verification API
-	url := fmt.Sprintf("%s/%.2f", baseURL, amount)
+	// URL for slip verification API - using original URL which may contain double slash
+	url := fmt.Sprintf("%s/%.2f", c.APIURL, amount)
 	log.Printf("VerifySlip using URL: %s", url)
 
 	// Custom HTTP client to skip TLS verification and set timeout
