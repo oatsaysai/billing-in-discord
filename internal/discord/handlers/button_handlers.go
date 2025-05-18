@@ -318,11 +318,11 @@ func handleViewDetailButton(s *discordgo.Session, i *discordgo.InteractionCreate
 			var actionButtons []discordgo.MessageComponent
 
 			if currentUserID == payerDiscordID && !isPaid {
-				// ลูกหนี้เห็นปุ่มชำระเงิน
+				// ลูกหนี้เห็นปุ่มชำระเงินเฉพาะรายการนี้
 				actionButtons = append(actionButtons, discordgo.Button{
-					Label:    "ชำระเงิน",
+					Label:    "ชำระเงินเฉพาะรายการนี้",
 					Style:    discordgo.PrimaryButton,
-					CustomID: fmt.Sprintf("%s%s", payDebtButtonPrefix, payeeDiscordID),
+					CustomID: fmt.Sprintf("pay_tx_%d", txID),
 					Disabled: isPaid,
 				})
 			}
@@ -858,9 +858,9 @@ func handleDebtDropdown(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			components = append(components, discordgo.ActionsRow{
 				Components: []discordgo.MessageComponent{
 					discordgo.Button{
-						Label:    "ชำระเงิน",
+						Label:    "ชำระเงินเฉพาะรายการนี้",
 						Style:    discordgo.PrimaryButton,
-						CustomID: fmt.Sprintf("%s%s", payDebtButtonPrefix, payeeDiscordID),
+						CustomID: fmt.Sprintf("pay_tx_%d", txID),
 					},
 				},
 			})
