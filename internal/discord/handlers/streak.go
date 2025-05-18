@@ -35,13 +35,18 @@ func HandleStreakCommand(s *discordgo.Session, m *discordgo.MessageCreate, args 
 		username = GetDiscordUsername(s, targetDiscordID)
 	}
 
-	// Create the message
+	// Create message
 	var messageContent strings.Builder
-	messageContent.WriteString(fmt.Sprintf("**🔥 Payment Streak ของ %s:**\n\n", username))
+	messageContent.WriteString(fmt.Sprintf("**🏆 Payment Streak ของ %s:**\n\n", username))
 
 	// Current streak info
-	messageContent.WriteString(fmt.Sprintf("**Streak ปัจจุบัน:** %d วัน\n", streakInfo.CurrentStreak))
-	messageContent.WriteString(fmt.Sprintf("**Streak สูงสุด:** %d วัน\n", streakInfo.LongestStreak))
+	messageContent.WriteString(fmt.Sprintf("**Streak ปัจจุบัน:** %d ครั้งติดต่อกันที่ติด Top 3\n", streakInfo.CurrentStreak))
+	messageContent.WriteString(fmt.Sprintf("**Streak สูงสุด:** %d ครั้งติดต่อกันที่ติด Top 3\n", streakInfo.LongestStreak))
+
+	// Streak explanation
+	messageContent.WriteString("\n**วิธีการนับ Streak:**\n")
+	messageContent.WriteString("- Streak เพิ่มขึ้นเมื่อชำระเงินและติดอันดับ Top 3\n")
+	messageContent.WriteString("- Streak จะถูกรีเซ็ตเมื่อชำระเงินแต่ไม่ติด Top 3\n")
 
 	// Last payment info
 	if !streakInfo.LastPaymentDate.IsZero() {

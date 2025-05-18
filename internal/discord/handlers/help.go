@@ -29,6 +29,7 @@ func HandleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 
 **คำสั่ง Gamification:**
 - ` + "`!badges [@user]`" + ` - แสดงเหรียญตราและความสำเร็จที่ได้รับ
+- ` + "`!streak [@user]`" + ` - แสดงสถิติและข้อมูล streak การชำระเงินที่ติด Top 3
 
 **รูปแบบการสร้างบิล:**
 - บรรทัดแรก: ` + "`!bill [promptpay_id]`" + ` (ถ้าไม่ระบุจะใช้ PromptPay ID ที่บันทึกไว้)

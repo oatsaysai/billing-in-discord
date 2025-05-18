@@ -119,7 +119,7 @@ func UpdatePaymentRankAndStreak(txn pgx.Tx, billID, userID, rank int, paidAt tim
 			INSERT INTO payment_streak 
 			(user_id, current_streak, longest_streak, last_payment_date, 
 			rank1_count, rank2_count, rank3_count) 
-			VALUES ($1, 1, 1, $2, 
+			VALUES ($1, CASE WHEN $6 BETWEEN 1 AND 3 THEN 1 ELSE 0 END, CASE WHEN $6 BETWEEN 1 AND 3 THEN 1 ELSE 0 END, $2, 
 			$3, $4, $5)
 		`, userID, paidAt,
 			func() int {
@@ -142,7 +142,7 @@ func UpdatePaymentRankAndStreak(txn pgx.Tx, billID, userID, rank int, paidAt tim
 				} else {
 					return 0
 				}
-			}())
+			}(), rank)
 		if err != nil {
 			return fmt.Errorf("error creating streak record: %w", err)
 		}
@@ -151,12 +151,14 @@ func UpdatePaymentRankAndStreak(txn pgx.Tx, billID, userID, rank int, paidAt tim
 		_, err = tx.Exec(context.Background(), `
 			UPDATE payment_streak SET 
 			current_streak = CASE 
-				WHEN DATE(last_payment_date) >= DATE(NOW() - INTERVAL '24 hours') THEN current_streak + 1 
-				ELSE 1 
+				-- เพิ่ม streak เมื่อติด top 3 (rank 1-3)
+				WHEN $3 BETWEEN 1 AND 3 THEN current_streak + 1 
+				-- รีเซ็ตเป็น 0 เมื่อไม่ติด top 3
+				ELSE 0 
 			END,
 			longest_streak = CASE 
-				WHEN DATE(last_payment_date) >= DATE(NOW() - INTERVAL '24 hours') AND current_streak + 1 > longest_streak THEN current_streak + 1 
-				WHEN current_streak + 1 > longest_streak THEN current_streak + 1
+				-- อัพเดท longest_streak เมื่อ current_streak ใหม่มากกว่า
+				WHEN $3 BETWEEN 1 AND 3 AND current_streak + 1 > longest_streak THEN current_streak + 1 
 				ELSE longest_streak 
 			END,
 			last_payment_date = $2,
