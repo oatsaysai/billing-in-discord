@@ -22,7 +22,4 @@ jobs:
           port: 22
           script: |
             cd ~/billing-in-discord/
-            git pull
-            docker compose build
-            docker compose down
-            docker compose up -d
+            ./deploy.sh
