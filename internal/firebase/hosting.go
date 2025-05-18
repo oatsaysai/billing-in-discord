@@ -13,10 +13,10 @@ import (
 )
 
 // DeployBillWebsite deploys a bill allocation website to Firebase Hosting
-func DeployBillWebsite(client *fbclient.Client, token, merchantName, webhookURL string, items []map[string]interface{}, users []map[string]interface{}) (string, error) {
+func DeployBillWebsite(client *fbclient.Client, token, merchantName, webhookURL string, items []map[string]interface{}, users []map[string]interface{}) (string, string, error) {
 	// แก้ไขเช็คเงื่อนไข
 	if client == nil {
-		return "", fmt.Errorf("Firebase client is not provided")
+		return "", "", fmt.Errorf("Firebase client is not provided")
 	}
 
 	// Generate a unique site name based on the token
@@ -32,19 +32,19 @@ func DeployBillWebsite(client *fbclient.Client, token, merchantName, webhookURL 
 	siteResult, err := client.CreateSite(siteName)
 	if err != nil {
 		log.Printf("Error creating Firebase site: %v", err)
-		return "", fmt.Errorf("failed to create Firebase site: %w", err)
+		return "", "", fmt.Errorf("failed to create Firebase site: %w", err)
 	}
 
 	// Generate the website HTML
 	contentDir, err := generateWebsiteHTML(token, merchantName, webhookURL, items, users)
 	if err != nil {
 		log.Printf("Error generating website HTML: %v", err)
-		return "", fmt.Errorf("failed to generate website HTML: %w", err)
+		return "", "", fmt.Errorf("failed to generate website HTML: %w", err)
 	}
 
 	// ตรวจสอบว่าไดเรกทอรีมีอยู่จริง
 	if _, err := os.Stat(contentDir); os.IsNotExist(err) {
-		return "", fmt.Errorf("website content directory does not exist: %s", contentDir)
+		return "", "", fmt.Errorf("website content directory does not exist: %s", contentDir)
 	}
 
 	// เก็บค่าเพื่อลบในภายหลัง แต่ไม่ใช้ defer
@@ -63,7 +63,7 @@ func DeployBillWebsite(client *fbclient.Client, token, merchantName, webhookURL 
 
 	if err != nil {
 		log.Printf("Error deploying to Firebase: %v", err)
-		return "", fmt.Errorf("failed to deploy to Firebase: %w", err)
+		return "", "", fmt.Errorf("failed to deploy to Firebase: %w", err)
 	}
 
 	// Get the deployed URL
@@ -93,10 +93,10 @@ func DeployBillWebsite(client *fbclient.Client, token, merchantName, webhookURL 
 		websiteURL = fmt.Sprintf("https://%s.web.app/?token=%s", siteName, token)
 	}
 
-	log.Printf("Deployed bill website: token=%s, merchant=%s, URL=%s",
-		token, merchantName, websiteURL)
+	log.Printf("Deployed bill website: token=%s, merchant=%s, URL=%s, siteName=%s",
+		token, merchantName, websiteURL, siteName)
 
-	return websiteURL, nil
+	return websiteURL, siteName, nil
 }
 
 // generateWebsiteHTML generates the HTML for the bill allocation website

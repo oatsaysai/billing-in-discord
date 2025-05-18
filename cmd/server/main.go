@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/oatsaysai/billing-in-discord/internal/config"
 	"github.com/oatsaysai/billing-in-discord/internal/db"
@@ -86,6 +87,16 @@ func main() {
 	}()
 
 	log.Println("Billing in Discord bot is now running. Press CTRL+C to exit.")
+
+	// Setup periodic cleanup of expired Firebase sites
+	ticker := time.NewTicker(5 * time.Minute)
+	go func() {
+		for range ticker.C {
+			discord.CleanupExpiredSites()
+		}
+	}()
+	defer ticker.Stop()
+
 	// Keep the application running until context is cancelled
 	<-ctx.Done()
 	log.Println("Billing in Discord bot shutting down...")

@@ -99,7 +99,7 @@ func HandleOCRBillAttachment(s *discordgo.Session, m *discordgo.MessageCreate, a
 
 	summary.WriteString("**รายการ**:\n")
 	for i, item := range billData.Items {
-		summary.WriteString(fmt.Sprintf("%d. %s x%d = %.2f บาท\n", i+1, item.Name, item.Quantity, item.Price))
+		summary.WriteString(fmt.Sprintf("%d. %s (จำนวน %d): %.2f บาท\n", i+1, item.Name, item.Quantity, item.Price))
 	}
 
 	if billData.SubTotal > 0 {
@@ -331,7 +331,7 @@ func createBillWebsite(s *discordgo.Session, i *discordgo.InteractionCreate, mes
 			"name":     item.Name,
 			"quantity": item.Quantity,
 			"price":    item.Price,
-			"total":    float64(item.Quantity) * item.Price,
+			"total":    item.Price, // ใช้ราคาโดยตรงเป็นยอดรวม ไม่ต้องคูณจำนวน
 		})
 	}
 
@@ -360,11 +360,22 @@ func createBillWebsite(s *discordgo.Session, i *discordgo.InteractionCreate, mes
 	}
 
 	// Deploy the website using the Firebase client
-	websiteURL, err := firebase.DeployBillWebsite(firebaseClient, token, billData.MerchantName, webhookURL, webItems, webUsers)
+	websiteURL, siteName, err := firebase.DeployBillWebsite(firebaseClient, token, billData.MerchantName, webhookURL, webItems, webUsers)
 	if err != nil {
 		log.Printf("Error deploying bill website: %v", err)
 		sendFollowupError(s, i, fmt.Sprintf("เกิดข้อผิดพลาดในการสร้างเว็บไซต์: %v", err))
 		return
+	}
+
+	// Store the site information in the database
+	userDbID, err := db.GetOrCreateUser(i.Member.User.ID)
+	if err == nil {
+		// Save site information for cleanup later
+		err = db.SaveFirebaseSite(userDbID, firebaseClient.ProjectID, siteName, websiteURL, token)
+		if err != nil {
+			log.Printf("Warning: Failed to save Firebase site to database: %v", err)
+			// Continue anyway, non-critical error
+		}
 	}
 
 	// Send the website URL to the user
@@ -382,6 +393,20 @@ func generateToken() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return base64.URLEncoding.EncodeToString(b)
+}
+
+// CleanupSessionDataByToken cleans up session data in memory maps when a token expires
+func CleanupSessionDataByToken(token string) {
+	delete(webSessionTokens, token)
+
+	// Try to clean up related data if possible
+	// We can only do this if we can derive messageID from token
+	parts := strings.Split(token, "_")
+	if len(parts) > 0 {
+		possibleMessageID := parts[0]
+		delete(billOCRDataStore, possibleMessageID)
+		delete(tempSelectedUsers, possibleMessageID)
+	}
 }
 
 // stringPtr returns a pointer to the given string
@@ -439,7 +464,11 @@ func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
 			Users        []string `json:"users"`
 			IsNew        bool     `json:"isNew"`
 		} `json:"billItems"`
-		PromptPayID string `json:"promptPayID"`
+		PromptPayID       string `json:"promptPayID"`
+		AdditionalCharges struct {
+			AddVat           bool `json:"addVat"`
+			AddServiceCharge bool `json:"addServiceCharge"`
+		} `json:"additionalCharges"`
 	}
 
 	err = json.Unmarshal(body, &payload)
@@ -494,7 +523,7 @@ func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Process the bill allocation
-		successMsg, err := processBillAllocation(discordSession, dummyInteraction, sessionData.BillData, itemAllocations, payload.PromptPayID)
+		successMsg, err := processBillAllocation(discordSession, dummyInteraction, sessionData.BillData, itemAllocations, payload.PromptPayID, payload.AdditionalCharges.AddVat, payload.AdditionalCharges.AddServiceCharge)
 		if err != nil {
 			log.Printf("Error processing bill allocation from webhook: %v", err)
 			// Send error message to Discord channel
@@ -509,6 +538,45 @@ func HandleBillWebhookCallback(w http.ResponseWriter, r *http.Request) {
 		delete(billOCRDataStore, strings.Split(payload.Token, "_")[0])
 		delete(tempSelectedUsers, strings.Split(payload.Token, "_")[0])
 		delete(webSessionTokens, payload.Token)
+
+		// Delete the Firebase site after successful processing
+		go func() {
+			// Give some time for the success message to be seen by the user
+			time.Sleep(5 * time.Second)
+
+			// Try to get site info from the database first
+			site, err := db.GetFirebaseSiteByToken(payload.Token)
+			if err == nil && site != nil && site.SiteName != "" {
+				log.Printf("Found site in database, deleting Firebase site %s after successful data processing", site.SiteName)
+
+				if firebaseClient != nil {
+					if err := firebaseClient.DeleteSite(site.SiteName); err != nil {
+						log.Printf("Error deleting Firebase site %s: %v", site.SiteName, err)
+					} else {
+						// Update site status in the database
+						err := db.UpdateFirebaseSiteStatus(site.SiteName, "inactive")
+						if err != nil {
+							log.Printf("Error updating site status: %v", err)
+						}
+						log.Printf("Successfully deleted Firebase site %s", site.SiteName)
+					}
+				}
+			} else {
+				// Fallback to generating site name if not found in database
+				siteName := fmt.Sprintf("bill-%s", payload.Token[:12])
+				log.Printf("Site not found in database, trying by pattern: deleting Firebase site %s after successful data processing", siteName)
+
+				if firebaseClient != nil {
+					if err := firebaseClient.DeleteSite(siteName); err != nil {
+						log.Printf("Error deleting Firebase site %s: %v", siteName, err)
+					} else {
+						// Update site status in the database
+						db.UpdateFirebaseSiteStatus(siteName, "inactive")
+						log.Printf("Successfully deleted Firebase site %s", siteName)
+					}
+				}
+			}
+		}()
 	}()
 
 	// Respond with success
@@ -525,7 +593,7 @@ func getDiscordSession() *discordgo.Session {
 
 // processBillAllocation creates transactions based on the bill allocation
 func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate, billData *ocr.ExtractBillTextResponse,
-	itemAllocations map[int][]string, promptPayID string) (string, error) {
+	itemAllocations map[int][]string, promptPayID string, addVat bool, addServiceCharge bool) (string, error) {
 
 	payeeDiscordID := i.Member.User.ID
 	payeeDbID, err := db.GetOrCreateUser(payeeDiscordID)
@@ -587,7 +655,7 @@ func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate,
 			continue
 		}
 
-		itemTotal := item.Price * float64(item.Quantity)
+		itemTotal := item.Price // ใช้ราคาโดยตรงจาก OCR โดยไม่ต้องคูณจำนวน เพราะเป็นยอดรวมแล้ว
 		totalBillAmount += itemTotal
 
 		// Handle "all" special case
@@ -614,12 +682,62 @@ func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate,
 		for _, payerDiscordID := range users {
 			// ข้ามการบันทึกรายการถ้าเจ้าของบิล (ผู้ออกเงินไปก่อน) เป็นคนเดียวกับผู้จ่าย
 			if payerDiscordID == payeeDiscordID {
-				log.Printf("Skipping transaction for bill owner (self-payment) for item '%s'", description)
+				//log.Printf("Skipping transaction for bill owner (self-payment) for item '%s'", description)
 				continue
 			}
 
 			// เพิ่มจำนวนเงินที่ต้องจ่ายเข้าไปในยอดรวม
 			userTotalDebts[payerDiscordID] += amountPerPerson
+		}
+	}
+
+	// คำนวณ VAT และ Service Charge ถ้ามีการติ๊กเลือก
+	var additionalChargesSummary strings.Builder
+	additionalChargesSummary.WriteString("**ค่าบริการเพิ่มเติม:**\n")
+
+	vatAmount := 0.0
+	serviceChargeAmount := 0.0
+	hasAdditionalCharges := false
+
+	// คำนวณ VAT 7% ถ้ามีการติ๊กเลือก
+	if addVat {
+		vatRate := 0.07 // 7%
+		vatAmount = totalBillAmount * vatRate
+		additionalChargesSummary.WriteString(fmt.Sprintf("- VAT 7%%: %.2f บาท\n", vatAmount))
+		hasAdditionalCharges = true
+	}
+
+	// คำนวณ Service Charge 10% ถ้ามีการติ๊กเลือก
+	if addServiceCharge {
+		serviceChargeRate := 0.10 // 10%
+		serviceChargeAmount = totalBillAmount * serviceChargeRate
+		additionalChargesSummary.WriteString(fmt.Sprintf("- Service Charge 10%%: %.2f บาท\n", serviceChargeAmount))
+		hasAdditionalCharges = true
+	}
+
+	// คำนวณยอดรวมหลังรวม VAT และ Service Charge
+	finalTotalAmount := totalBillAmount + vatAmount + serviceChargeAmount
+
+	// ถ้ามีค่าบริการเพิ่มเติม ให้แสดงรายละเอียด
+	if hasAdditionalCharges {
+		additionalChargesSummary.WriteString(fmt.Sprintf("**ยอดรวมทั้งหมดหลังรวมค่าบริการเพิ่มเติม: %.2f บาท**\n", finalTotalAmount))
+
+		// เพิ่ม VAT และ Service Charge เข้าไปในยอดหนี้ของแต่ละคน ตามสัดส่วน
+		if len(userTotalDebts) > 0 {
+			totalDebtWithoutCharges := 0.0
+			for _, amount := range userTotalDebts {
+				totalDebtWithoutCharges += amount
+			}
+
+			// คำนวณตามสัดส่วน
+			for payerDiscordID, amount := range userTotalDebts {
+				// คำนวณสัดส่วนของแต่ละคน
+				proportion := amount / totalDebtWithoutCharges
+
+				// เพิ่ม VAT และ Service Charge ตามสัดส่วน
+				additionalAmount := (vatAmount + serviceChargeAmount) * proportion
+				userTotalDebts[payerDiscordID] += additionalAmount
+			}
 		}
 	}
 
@@ -638,6 +756,15 @@ func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate,
 
 		// สร้างคำอธิบายรายการที่รวมเป็นบิลเดียว
 		description := fmt.Sprintf("รายการทั้งหมดจากบิล %s วันที่ %s", billData.MerchantName, billData.Datetime)
+		if hasAdditionalCharges {
+			if addVat && addServiceCharge {
+				description += " (รวม VAT 7% และ Service Charge 10%)"
+			} else if addVat {
+				description += " (รวม VAT 7%)"
+			} else if addServiceCharge {
+				description += " (รวม Service Charge 10%)"
+			}
+		}
 
 		txID, txErr := db.CreateTransaction(payerDbID, payeeDbID, totalAmount, description)
 		if txErr != nil {
@@ -658,10 +785,15 @@ func processBillAllocation(s *discordgo.Session, i *discordgo.InteractionCreate,
 	// Send bill summary to channel
 	s.ChannelMessageSend(i.ChannelID, billItemsSummary.String())
 
+	// ถ้ามีค่าบริการเพิ่มเติม ให้แสดงรายละเอียด
+	if hasAdditionalCharges {
+		s.ChannelMessageSend(i.ChannelID, additionalChargesSummary.String())
+	}
+
 	// Create QR codes for each payer if promptPayID is available
 	if len(userTotalDebts) > 0 {
 		var qrSummary strings.Builder
-		qrSummary.WriteString(fmt.Sprintf("\n**ยอดรวมทั้งสิ้น: %.2f บาท**\n", totalBillAmount))
+		qrSummary.WriteString(fmt.Sprintf("\n**ยอดรวมทั้งสิ้น: %.2f บาท**\n", finalTotalAmount))
 
 		// Only mention QR codes if we have a PromptPay ID
 		if promptPayID != "" {

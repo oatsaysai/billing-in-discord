@@ -2,6 +2,7 @@ package discord
 
 import (
 	"fmt"
+	"github.com/oatsaysai/billing-in-discord/internal/db"
 	"log"
 	"net/http"
 	"regexp"
@@ -83,6 +84,44 @@ func Close() {
 // GetSession returns the Discord session
 func GetSession() *discordgo.Session {
 	return session
+}
+
+// CleanupExpiredSites deletes expired Firebase sites (older than specified minutes)
+func CleanupExpiredSites() {
+	if firebaseClient == nil {
+		log.Println("Firebase client not initialized, skipping site cleanup")
+		return
+	}
+
+	// Get expired sites from database (older than 30 minutes)
+	expiredSites, err := db.GetExpiredFirebaseSites(30) // 30 minutes
+	if err != nil {
+		log.Printf("Error getting expired Firebase sites: %v", err)
+		return
+	}
+
+	if len(expiredSites) == 0 {
+		return // No expired sites to cleanup
+	}
+
+	log.Printf("Found %d expired Firebase sites to cleanup", len(expiredSites))
+
+	for _, site := range expiredSites {
+		log.Printf("Cleaning up expired Firebase site: %s (created %v)", site.SiteName, site.CreatedAt)
+		if err := firebaseClient.DeleteSite(site.SiteName); err != nil {
+			log.Printf("Error deleting expired Firebase site %s: %v", site.SiteName, err)
+		} else {
+			// Update site status in the database
+			db.UpdateFirebaseSiteStatus(site.SiteName, "inactive")
+			log.Printf("Successfully deleted expired Firebase site %s", site.SiteName)
+
+			// Try to find owner using site_token and clean up memory storage in handlers
+			if site.SiteToken != "" {
+				handlers.CleanupSessionDataByToken(site.SiteToken)
+				log.Printf("Cleaned up memory storage for token %s", site.SiteToken)
+			}
+		}
+	}
 }
 
 // HandleBillWebhookCallback is a bridge to the handler's implementation

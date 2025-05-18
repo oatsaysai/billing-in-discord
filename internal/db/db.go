@@ -173,7 +173,7 @@ func Migrate() {
 		site_url TEXT NOT NULL,        
 		created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-		status TEXT NOT NULL DEFAULT 'active' -- e.g., 'active', 'disabled'
+		status TEXT NOT NULL DEFAULT 'active' -- e.g., 'active', 'inactive'
 	);
 	CREATE INDEX IF NOT EXISTS idx_firebase_sites_user_db_id_status ON firebase_sites(user_db_id, status);
 	CREATE INDEX IF NOT EXISTS idx_firebase_sites_site_name ON firebase_sites(site_name);
@@ -219,6 +219,60 @@ func Migrate() {
 	_, err = Pool.Exec(context.Background(), firebaseSitesTrigger)
 	if err != nil {
 		log.Fatalf("Failed to apply trigger to firebase_sites: %v", err)
+	}
+
+	// Check if site_token column exists in firebase_sites table
+	var columnExists bool
+	err = Pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_name = 'firebase_sites' AND column_name = 'site_token'
+		)
+	`).Scan(&columnExists)
+
+	if err != nil {
+		log.Printf("Error checking if site_token column exists: %v", err)
+		// Continue anyway, we'll try to add the column
+	}
+
+	// Add site_token column to existing firebase_sites table if it doesn't exist
+	if !columnExists {
+		addSiteTokenColumn := `
+			ALTER TABLE firebase_sites
+			ADD COLUMN site_token TEXT;
+		`
+		_, err = Pool.Exec(context.Background(), addSiteTokenColumn)
+		if err != nil {
+			log.Fatalf("Failed to add site_token column to firebase_sites table: %v", err)
+		}
+		log.Println("Added site_token column to firebase_sites table")
+	}
+
+	// Create index for site_token if needed
+	var indexExists bool
+	err = Pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_indexes
+			WHERE tablename = 'firebase_sites' AND indexname = 'idx_firebase_sites_site_token'
+		)
+	`).Scan(&indexExists)
+
+	if err != nil {
+		log.Printf("Error checking if site_token index exists: %v", err)
+		// Continue anyway, we'll try to create the index
+	}
+
+	if !indexExists {
+		addSiteTokenIndex := `
+			CREATE INDEX idx_firebase_sites_site_token ON firebase_sites(site_token);
+		`
+		_, err = Pool.Exec(context.Background(), addSiteTokenIndex)
+		if err != nil {
+			log.Fatalf("Failed to create index on site_token column: %v", err)
+		}
+		log.Println("Created index on site_token column")
 	}
 
 	log.Println("Database migration completed successfully")
@@ -416,4 +470,104 @@ func GetTransactionInfo(txID int) (map[string]interface{}, error) {
 	}
 
 	return result, nil
+}
+
+// UpdateFirebaseSiteStatus updates the status of a Firebase site
+func UpdateFirebaseSiteStatus(siteName, status string) error {
+	query := `
+		UPDATE firebase_sites
+		SET status = $1, updated_at = CURRENT_TIMESTAMP
+		WHERE site_name = $2
+	`
+
+	_, err := Pool.Exec(context.Background(), query, status, siteName)
+	if err != nil {
+		return fmt.Errorf("error updating firebase site status: %w", err)
+	}
+
+	return nil
+}
+
+// SaveFirebaseSite saves a Firebase site to the database
+func SaveFirebaseSite(userDbID int, projectID, siteName, siteURL, token string) error {
+	query := `
+		INSERT INTO firebase_sites (user_db_id, firebase_project_id, site_name, site_url, site_token, status)
+		VALUES ($1, $2, $3, $4, $5, 'active')
+		ON CONFLICT (site_name) 
+		DO UPDATE SET site_url = $4, site_token = $5, status = 'active', updated_at = CURRENT_TIMESTAMP
+	`
+
+	_, err := Pool.Exec(context.Background(), query, userDbID, projectID, siteName, siteURL, token)
+	if err != nil {
+		return fmt.Errorf("error saving firebase site: %w", err)
+	}
+
+	return nil
+}
+
+// GetFirebaseSiteByToken gets a Firebase site by token
+func GetFirebaseSiteByToken(token string) (*FirebaseSite, error) {
+	query := `
+		SELECT id, user_db_id, firebase_project_id, site_name, site_url, created_at, status, site_token
+		FROM firebase_sites
+		WHERE site_token = $1 AND status = 'active'
+		LIMIT 1
+	`
+
+	var site FirebaseSite
+	err := Pool.QueryRow(context.Background(), query, token).Scan(
+		&site.ID, &site.UserDbID, &site.FirebaseProjectID, &site.SiteName,
+		&site.SiteURL, &site.CreatedAt, &site.Status, &site.SiteToken,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("error finding firebase site by token: %w", err)
+	}
+
+	return &site, nil
+}
+
+// GetExpiredFirebaseSites gets Firebase sites that were created more than 'minutes' minutes ago
+func GetExpiredFirebaseSites(minutes int) ([]FirebaseSite, error) {
+	query := `
+		SELECT id, user_db_id, firebase_project_id, site_name, site_url, created_at, status, site_token
+		FROM firebase_sites
+		WHERE status = 'active' AND created_at < NOW() - INTERVAL '1 minute' * $1
+	`
+
+	rows, err := Pool.Query(context.Background(), query, minutes)
+	if err != nil {
+		return nil, fmt.Errorf("error querying expired firebase sites: %w", err)
+	}
+	defer rows.Close()
+
+	var sites []FirebaseSite
+	for rows.Next() {
+		var site FirebaseSite
+		if err := rows.Scan(
+			&site.ID, &site.UserDbID, &site.FirebaseProjectID, &site.SiteName,
+			&site.SiteURL, &site.CreatedAt, &site.Status, &site.SiteToken,
+		); err != nil {
+			return nil, fmt.Errorf("error scanning firebase site row: %w", err)
+		}
+		sites = append(sites, site)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating firebase site rows: %w", err)
+	}
+
+	return sites, nil
+}
+
+// FirebaseSite represents a firebase site in the database
+type FirebaseSite struct {
+	ID                int
+	UserDbID          int
+	FirebaseProjectID string
+	SiteName          string
+	SiteURL           string
+	SiteToken         string
+	CreatedAt         time.Time
+	Status            string
 }
