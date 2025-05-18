@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -58,40 +59,67 @@ func (c *Client) VerifySlip(amount float64, imgPath string) (*VerifySlipResponse
 		return nil, fmt.Errorf("VerifySlip: failed to marshal JSON: %w", err)
 	}
 
-	// URL for slip verification API
-	url := fmt.Sprintf("%s/%.2f", c.APIURL, amount)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("VerifySlip: failed to create request: %w", err)
+	// Fix potential double slash in URL
+	baseURL := c.APIURL
+	if strings.HasSuffix(baseURL, "/") {
+		baseURL = strings.TrimSuffix(baseURL, "/")
 	}
-	req.Header.Set("Content-Type", "application/json")
+
+	// URL for slip verification API
+	url := fmt.Sprintf("%s/%.2f", baseURL, amount)
+	log.Printf("VerifySlip using URL: %s", url)
 
 	// Custom HTTP client to skip TLS verification and set timeout
 	client := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // WARNING: Insecure, use only if you trust the endpoint or for local dev
 		},
-		Timeout: 20 * time.Second, // Request timeout
+		Timeout: 60 * time.Second,
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("VerifySlip: failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("VerifySlip: failed to read response: %w", err)
+	// Implement retry mechanism
+	const maxRetries = 3
+	var respBody []byte
+	var resp *http.Response
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return nil, fmt.Errorf("VerifySlip: failed to create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err = client.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			respBody, err = io.ReadAll(resp.Body)
+			if err == nil {
+				break // Success - exit the retry loop
+			}
+			log.Printf("VerifySlip: failed to read response on attempt %d: %v", attempt, err)
+		} else {
+			log.Printf("VerifySlip: request failed on attempt %d: %v", attempt, err)
+		}
+
+		if attempt < maxRetries {
+			// Wait before retrying with exponential backoff
+			backoffTime := time.Duration(1<<attempt) * time.Second
+			log.Printf("VerifySlip: retrying in %v, attempt %d/%d", backoffTime, attempt+1, maxRetries)
+			time.Sleep(backoffTime)
+		} else {
+			// All retries failed
+			return nil, fmt.Errorf("VerifySlip: failed to send request after %d attempts: %w", maxRetries, err)
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("VerifySlip: API returned status %d. Body: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("VerifySlip: API returned status %d. Body: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result VerifySlipResponse
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		// Try to log the body if unmarshal fails for debugging
-		return nil, fmt.Errorf("VerifySlip: failed to unmarshal response: %v, body: %s", err, string(body))
+		return nil, fmt.Errorf("VerifySlip: failed to unmarshal response: %v, body: %s", err, string(respBody))
 	}
 	log.Printf("VerifySlip successful for amount %.2f. API Response Ref: %s", amount, result.Data.Ref)
 	return &result, nil
