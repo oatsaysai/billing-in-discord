@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Define regex patterns for transaction ID extraction
@@ -358,83 +360,11 @@ func MarkTransactionPaidAndUpdateDebt(txID int) error {
 	// Assign rank based on existing ranks
 	newRank := existingRankCount + 1
 	if newRank <= 3 { // Only track top 3 ranks
-		_, err = tx.Exec(context.Background(), `
-			INSERT INTO bill_payment_ranking 
-			(bill_id, user_id, rank, paid_at, payment_duration) 
-			VALUES ($1, $2, $3, $4, $5)
-		`, txID, payerDbID, newRank, paidAt, durationSeconds)
+		// Use the shared utility function to update payment ranking and streak
+		err = UpdatePaymentRankAndStreak(tx.(pgx.Tx), txID, payerDbID, newRank, paidAt, durationSeconds)
 		if err != nil {
-			log.Printf("Error recording payment ranking: %v", err)
-			// Continue despite error
-		}
-
-		// Update user's streak data
-		var existingRecord bool
-		err = tx.QueryRow(context.Background(), `
-			SELECT EXISTS(SELECT 1 FROM payment_streak WHERE user_id = $1)
-		`, payerDbID).Scan(&existingRecord)
-		if err != nil {
-			log.Printf("Error checking existing streak record: %v", err)
-			// Continue despite error
-		}
-
-		if !existingRecord {
-			// Create new streak record
-			_, err = tx.Exec(context.Background(), `
-				INSERT INTO payment_streak 
-				(user_id, current_streak, longest_streak, last_payment_date, 
-				rank1_count, rank2_count, rank3_count) 
-				VALUES ($1, 1, 1, $2, 
-				$3, $4, $5)
-			`, payerDbID, paidAt,
-				func() int {
-					if newRank == 1 {
-						return 1
-					} else {
-						return 0
-					}
-				}(),
-				func() int {
-					if newRank == 2 {
-						return 1
-					} else {
-						return 0
-					}
-				}(),
-				func() int {
-					if newRank == 3 {
-						return 1
-					} else {
-						return 0
-					}
-				}())
-			if err != nil {
-				log.Printf("Error creating streak record: %v", err)
-				// Continue despite error
-			}
-		} else {
-			// Update existing streak record
-			_, err = tx.Exec(context.Background(), `
-				UPDATE payment_streak SET 
-				current_streak = CASE 
-					WHEN DATE(last_payment_date) >= DATE(NOW() - INTERVAL '24 hours') THEN current_streak + 1 
-					ELSE 1 
-				END,
-				longest_streak = CASE 
-					WHEN DATE(last_payment_date) >= DATE(NOW() - INTERVAL '24 hours') AND current_streak + 1 > longest_streak THEN current_streak + 1 
-					WHEN current_streak + 1 > longest_streak THEN current_streak + 1
-					ELSE longest_streak 
-				END,
-				last_payment_date = $2,
-				rank1_count = CASE WHEN $3 = 1 THEN rank1_count + 1 ELSE rank1_count END,
-				rank2_count = CASE WHEN $3 = 2 THEN rank2_count + 1 ELSE rank2_count END,
-				rank3_count = CASE WHEN $3 = 3 THEN rank3_count + 1 ELSE rank3_count END
-				WHERE user_id = $1
-			`, payerDbID, paidAt, newRank)
-			if err != nil {
-				log.Printf("Error updating streak record: %v", err)
-				// Continue despite error
-			}
+			log.Printf("Error updating payment rank and streak: %v", err)
+			// Continue despite error - we still want to mark the transaction as paid
 		}
 	}
 

@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -132,22 +131,8 @@ func HandleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 			if err == nil {
 				successCount++
 
-				// Get payer DB ID for checking rank
-				var payerDbID int
-				payerDbID, err = db.GetOrCreateUser(debtorDiscordID)
-				if err == nil {
-					// Check if the payer is rank 1 and send automatic praise
-					var rank int
-					err = db.Pool.QueryRow(context.Background(), `
-						SELECT rank FROM bill_payment_ranking 
-						WHERE bill_id = $1 AND user_id = $2
-					`, txID, payerDbID).Scan(&rank)
-
-					if err == nil && rank == 1 {
-						// User is rank 1, send automatic praise
-						go SendAutomaticPraise(s, m.ChannelID, txID, debtorDiscordID)
-					}
-				}
+				// Check and send automatic praise if applicable
+				CheckAndSendAutomaticPraise(s, m.ChannelID, txID, debtorDiscordID)
 			} else {
 				failCount++
 				failMessages = append(failMessages, fmt.Sprintf("TxID %d (%v)", txID, err))

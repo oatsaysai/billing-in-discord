@@ -27,6 +27,34 @@ var praiseMessages = []AutomaticPraiseMessage{
 	{Message: "ขอปรบมือให้กับผู้ชำระเงินคนแรก! พวกเราซาบซึ้งในความรวดเร็ว", Emoji: "🌟"},
 }
 
+// CheckAndSendAutomaticPraise checks if a user is rank 1 in a transaction and sends praise if applicable
+// This is a shared helper function used by multiple handlers to reduce code duplication
+func CheckAndSendAutomaticPraise(s *discordgo.Session, channelID string, txID int, userDiscordID string) {
+	// Get user's DB ID
+	userDbID, err := db.GetOrCreateUser(userDiscordID)
+	if err != nil {
+		log.Printf("Error getting user DB ID for automatic praise check: %v", err)
+		return
+	}
+
+	// Check if the user is rank 1 in this transaction
+	var rank int
+	err = db.Pool.QueryRow(context.Background(), `
+		SELECT rank FROM bill_payment_ranking 
+		WHERE bill_id = $1 AND user_id = $2
+	`, txID, userDbID).Scan(&rank)
+
+	if err != nil {
+		log.Printf("Error checking rank for txID %d, user %s: %v", txID, userDiscordID, err)
+		return
+	}
+
+	// If user is rank 1, send automatic praise
+	if rank == 1 {
+		go SendAutomaticPraise(s, channelID, txID, userDiscordID)
+	}
+}
+
 // SendAutomaticPraise sends an automatic praise message to the first person who paid
 func SendAutomaticPraise(s *discordgo.Session, channelID string, txID int, payerDiscordID string) error {
 	// Check if this transaction's rank 1 has already been praised

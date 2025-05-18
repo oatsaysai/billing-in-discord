@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"strconv"
@@ -77,17 +76,8 @@ func HandlePaidCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 				// Check for new badges for payer (debtor)
 				CheckAndAwardBadges(s, payerDiscordID, m.ChannelID)
 
-				// Check if the payer is rank 1 and send automatic praise
-				var rank int
-				err := db.Pool.QueryRow(context.Background(), `
-					SELECT rank FROM bill_payment_ranking 
-					WHERE bill_id = $1 AND user_id = $2
-				`, txID, payerDbID).Scan(&rank)
-
-				if err == nil && rank == 1 {
-					// User is rank 1, send automatic praise
-					go SendAutomaticPraise(s, m.ChannelID, txID, payerDiscordID)
-				}
+				// Check and send automatic praise if applicable
+				CheckAndSendAutomaticPraise(s, m.ChannelID, txID, payerDiscordID)
 			}
 
 			// Also check for badges for payee (creditor) who just marked as paid

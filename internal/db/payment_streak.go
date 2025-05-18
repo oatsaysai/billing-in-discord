@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // BillPaymentRanking represents a payment ranking record
@@ -71,13 +73,24 @@ func MigratePaymentStreakTables() error {
 	return nil
 }
 
-// RecordPaymentRanking records a user's payment ranking for a bill
-func RecordPaymentRanking(billID, userID, rank int, paidAt time.Time, durationSeconds int) error {
-	tx, err := Pool.Begin(context.Background())
-	if err != nil {
-		return fmt.Errorf("error starting transaction: %w", err)
+// UpdatePaymentRankAndStreak is a common utility function that handles payment ranking and streak updates
+// Can be used with or without a transaction - if txn is nil, a new transaction will be created
+func UpdatePaymentRankAndStreak(txn pgx.Tx, billID, userID, rank int, paidAt time.Time, durationSeconds int) error {
+	var err error
+	var ownTx bool
+	var tx pgx.Tx
+
+	// Use provided transaction or create a new one
+	if txn == nil {
+		tx, err = Pool.Begin(context.Background())
+		if err != nil {
+			return fmt.Errorf("error starting transaction: %w", err)
+		}
+		defer tx.Rollback(context.Background())
+		ownTx = true
+	} else {
+		tx = txn
 	}
-	defer tx.Rollback(context.Background())
 
 	// Record the payment ranking
 	_, err = tx.Exec(context.Background(), `
@@ -157,12 +170,21 @@ func RecordPaymentRanking(billID, userID, rank int, paidAt time.Time, durationSe
 		}
 	}
 
-	// Commit the transaction
-	if err := tx.Commit(context.Background()); err != nil {
-		return fmt.Errorf("error committing transaction: %w", err)
+	// Commit the transaction if we own it
+	if ownTx {
+		if err := tx.Commit(context.Background()); err != nil {
+			return fmt.Errorf("error committing transaction: %w", err)
+		}
 	}
 
 	return nil
+}
+
+// RecordPaymentRanking records a user's payment ranking for a bill
+func RecordPaymentRanking(billID, userID, rank int, paidAt time.Time, durationSeconds int) error {
+	// Use the common utility function with a nil transaction to create its own
+	var tx pgx.Tx = nil
+	return UpdatePaymentRankAndStreak(tx, billID, userID, rank, paidAt, durationSeconds)
 }
 
 // MarkPraiseGiven marks that praise was given for a payment ranking
