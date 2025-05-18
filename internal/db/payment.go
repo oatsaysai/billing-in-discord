@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Define regex patterns for transaction ID extraction
@@ -296,6 +297,7 @@ func ParseBotQRMessageContent(content string) (debtorDiscordID string, amount fl
 func MarkTransactionPaidAndUpdateDebt(txID int) error {
 	var payerDbID, payeeDbID int
 	var amount float64
+	var createdAt time.Time
 
 	// Begin a database transaction
 	tx, err := Pool.Begin(context.Background())
@@ -306,8 +308,8 @@ func MarkTransactionPaidAndUpdateDebt(txID int) error {
 
 	// Retrieve transaction details and lock the row for update
 	err = tx.QueryRow(context.Background(),
-		`SELECT payer_id, payee_id, amount FROM transactions WHERE id = $1 AND already_paid = false FOR UPDATE`, txID,
-	).Scan(&payerDbID, &payeeDbID, &amount)
+		`SELECT payer_id, payee_id, amount, created_at FROM transactions WHERE id = $1 AND already_paid = false FOR UPDATE`, txID,
+	).Scan(&payerDbID, &payeeDbID, &amount, &createdAt)
 	if err != nil {
 		if err == sql.ErrNoRows || strings.Contains(err.Error(), "no rows in result set") {
 			log.Printf("TxID %d already paid or does not exist.", txID)
@@ -317,8 +319,11 @@ func MarkTransactionPaidAndUpdateDebt(txID int) error {
 		return fmt.Errorf("failed to retrieve unpaid transaction %d: %w", txID, err)
 	}
 
+	// Get current time for paid timestamp
+	paidAt := time.Now()
+
 	// Mark the transaction as paid
-	_, err = tx.Exec(context.Background(), `UPDATE transactions SET already_paid = TRUE, paid_at = CURRENT_TIMESTAMP WHERE id = $1`, txID)
+	_, err = tx.Exec(context.Background(), `UPDATE transactions SET already_paid = TRUE, paid_at = $2 WHERE id = $1`, txID, paidAt)
 	if err != nil {
 		return fmt.Errorf("failed to mark transaction %d as paid: %w", txID, err)
 	}
@@ -333,6 +338,104 @@ func MarkTransactionPaidAndUpdateDebt(txID int) error {
 		// Log error but don't necessarily fail the whole operation if transaction was marked paid
 		// This could happen if the user_debts record was already cleared or inconsistent.
 		log.Printf("Warning/Error updating user_debts for txID %d (debtor %d, creditor %d, amount %.2f): %v. This might be okay if debt was already cleared or manually adjusted.", txID, payerDbID, payeeDbID, amount, err)
+	}
+
+	// Record payment ranking
+	// Calculate duration from creation to payment
+	durationSeconds := int(paidAt.Sub(createdAt).Seconds())
+
+	// Get current payment rank for this transaction
+	var existingRankCount int
+	err = tx.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM bill_payment_ranking
+		WHERE bill_id = $1
+	`, txID).Scan(&existingRankCount)
+	if err != nil {
+		log.Printf("Error checking existing payment ranks: %v", err)
+		// Continue despite error
+	}
+
+	// Assign rank based on existing ranks
+	newRank := existingRankCount + 1
+	if newRank <= 3 { // Only track top 3 ranks
+		_, err = tx.Exec(context.Background(), `
+			INSERT INTO bill_payment_ranking 
+			(bill_id, user_id, rank, paid_at, payment_duration) 
+			VALUES ($1, $2, $3, $4, $5)
+		`, txID, payerDbID, newRank, paidAt, durationSeconds)
+		if err != nil {
+			log.Printf("Error recording payment ranking: %v", err)
+			// Continue despite error
+		}
+
+		// Update user's streak data
+		var existingRecord bool
+		err = tx.QueryRow(context.Background(), `
+			SELECT EXISTS(SELECT 1 FROM payment_streak WHERE user_id = $1)
+		`, payerDbID).Scan(&existingRecord)
+		if err != nil {
+			log.Printf("Error checking existing streak record: %v", err)
+			// Continue despite error
+		}
+
+		if !existingRecord {
+			// Create new streak record
+			_, err = tx.Exec(context.Background(), `
+				INSERT INTO payment_streak 
+				(user_id, current_streak, longest_streak, last_payment_date, 
+				rank1_count, rank2_count, rank3_count) 
+				VALUES ($1, 1, 1, $2, 
+				$3, $4, $5)
+			`, payerDbID, paidAt,
+				func() int {
+					if newRank == 1 {
+						return 1
+					} else {
+						return 0
+					}
+				}(),
+				func() int {
+					if newRank == 2 {
+						return 1
+					} else {
+						return 0
+					}
+				}(),
+				func() int {
+					if newRank == 3 {
+						return 1
+					} else {
+						return 0
+					}
+				}())
+			if err != nil {
+				log.Printf("Error creating streak record: %v", err)
+				// Continue despite error
+			}
+		} else {
+			// Update existing streak record
+			_, err = tx.Exec(context.Background(), `
+				UPDATE payment_streak SET 
+				current_streak = CASE 
+					WHEN DATE(last_payment_date) >= DATE(NOW() - INTERVAL '24 hours') THEN current_streak + 1 
+					ELSE 1 
+				END,
+				longest_streak = CASE 
+					WHEN DATE(last_payment_date) >= DATE(NOW() - INTERVAL '24 hours') AND current_streak + 1 > longest_streak THEN current_streak + 1 
+					WHEN current_streak + 1 > longest_streak THEN current_streak + 1
+					ELSE longest_streak 
+				END,
+				last_payment_date = $2,
+				rank1_count = CASE WHEN $3 = 1 THEN rank1_count + 1 ELSE rank1_count END,
+				rank2_count = CASE WHEN $3 = 2 THEN rank2_count + 1 ELSE rank2_count END,
+				rank3_count = CASE WHEN $3 = 3 THEN rank3_count + 1 ELSE rank3_count END
+				WHERE user_id = $1
+			`, payerDbID, paidAt, newRank)
+			if err != nil {
+				log.Printf("Error updating streak record: %v", err)
+				// Continue despite error
+			}
+		}
 	}
 
 	// Commit the database transaction

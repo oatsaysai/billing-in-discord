@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strconv"
@@ -68,6 +69,29 @@ func HandlePaidCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 			}
 		} else {
 			successMessages = append(successMessages, fmt.Sprintf("TxID %d ถูกทำเครื่องหมายว่าชำระแล้วเรียบร้อย", txID))
+
+			// Check for badges after payment
+			payerDbID := txInfo["payer_id"].(int)
+			payerDiscordID, errPayerID := db.GetDiscordIDFromDbID(payerDbID)
+			if errPayerID == nil {
+				// Check for new badges for payer (debtor)
+				CheckAndAwardBadges(s, payerDiscordID, m.ChannelID)
+
+				// Check if the payer is rank 1 and send automatic praise
+				var rank int
+				err := db.Pool.QueryRow(context.Background(), `
+					SELECT rank FROM bill_payment_ranking 
+					WHERE bill_id = $1 AND user_id = $2
+				`, txID, payerDbID).Scan(&rank)
+
+				if err == nil && rank == 1 {
+					// User is rank 1, send automatic praise
+					go SendAutomaticPraise(s, m.ChannelID, txID, payerDiscordID)
+				}
+			}
+
+			// Also check for badges for payee (creditor) who just marked as paid
+			CheckAndAwardBadges(s, m.Author.ID, m.ChannelID)
 		}
 	}
 
