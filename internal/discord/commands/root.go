@@ -48,6 +48,9 @@ func Register() {
 	// Register badge commands
 	RegisterBadgeCommands()
 
+	// Register streak commands
+	RegisterStreakCommands()
+
 	// Register help command
 	RegisterHelpCommand()
 }
