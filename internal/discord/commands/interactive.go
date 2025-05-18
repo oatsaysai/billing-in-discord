@@ -39,16 +39,16 @@ func RegisterInteractiveCommands() {
 		Handler: handlers.HandleInteractiveOwedToMe,
 	})
 
-	// Register the selecttx command
+	// Register the list command
 	registerCommand(CommandDefinition{
-		Name:        "selecttx",
+		Name:        "list",
 		Description: "Browse and select transactions",
-		Usage:       "!selecttx [unpaid|paid|due]",
+		Usage:       "!list [unpaid|paid|due]",
 		Examples: []string{
-			"!selecttx",
-			"!selecttx unpaid",
-			"!selecttx paid",
-			"!selecttx due",
+			"!list",
+			"!list unpaid",
+			"!list paid",
+			"!list due",
 		},
 		Handler: handlers.HandleSelectTransaction,
 	})

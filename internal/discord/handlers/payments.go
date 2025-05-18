@@ -68,6 +68,20 @@ func HandlePaidCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 			}
 		} else {
 			successMessages = append(successMessages, fmt.Sprintf("TxID %d ถูกทำเครื่องหมายว่าชำระแล้วเรียบร้อย", txID))
+
+			// Check for badges after payment
+			payerDbID := txInfo["payer_id"].(int)
+			payerDiscordID, errPayerID := db.GetDiscordIDFromDbID(payerDbID)
+			if errPayerID == nil {
+				// Check for new badges for payer (debtor)
+				CheckAndAwardBadges(s, payerDiscordID, m.ChannelID)
+
+				// Check and send automatic praise if applicable
+				CheckAndSendAutomaticPraise(s, m.ChannelID, txID, payerDiscordID)
+			}
+
+			// Also check for badges for payee (creditor) who just marked as paid
+			CheckAndAwardBadges(s, m.Author.ID, m.ChannelID)
 		}
 	}
 

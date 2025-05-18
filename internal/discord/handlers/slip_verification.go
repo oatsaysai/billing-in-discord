@@ -130,6 +130,9 @@ func HandleSlipVerification(s *discordgo.Session, m *discordgo.MessageCreate) {
 			err = db.MarkTransactionPaidAndUpdateDebt(txID) // This function handles both transaction and user_debt updates
 			if err == nil {
 				successCount++
+
+				// Check and send automatic praise if applicable
+				CheckAndSendAutomaticPraise(s, m.ChannelID, txID, debtorDiscordID)
 			} else {
 				failCount++
 				failMessages = append(failMessages, fmt.Sprintf("TxID %d (%v)", txID, err))

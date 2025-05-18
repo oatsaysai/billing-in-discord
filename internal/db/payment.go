@@ -8,6 +8,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Define regex patterns for transaction ID extraction
@@ -296,6 +299,7 @@ func ParseBotQRMessageContent(content string) (debtorDiscordID string, amount fl
 func MarkTransactionPaidAndUpdateDebt(txID int) error {
 	var payerDbID, payeeDbID int
 	var amount float64
+	var createdAt time.Time
 
 	// Begin a database transaction
 	tx, err := Pool.Begin(context.Background())
@@ -306,8 +310,8 @@ func MarkTransactionPaidAndUpdateDebt(txID int) error {
 
 	// Retrieve transaction details and lock the row for update
 	err = tx.QueryRow(context.Background(),
-		`SELECT payer_id, payee_id, amount FROM transactions WHERE id = $1 AND already_paid = false FOR UPDATE`, txID,
-	).Scan(&payerDbID, &payeeDbID, &amount)
+		`SELECT payer_id, payee_id, amount, created_at FROM transactions WHERE id = $1 AND already_paid = false FOR UPDATE`, txID,
+	).Scan(&payerDbID, &payeeDbID, &amount, &createdAt)
 	if err != nil {
 		if err == sql.ErrNoRows || strings.Contains(err.Error(), "no rows in result set") {
 			log.Printf("TxID %d already paid or does not exist.", txID)
@@ -317,8 +321,11 @@ func MarkTransactionPaidAndUpdateDebt(txID int) error {
 		return fmt.Errorf("failed to retrieve unpaid transaction %d: %w", txID, err)
 	}
 
+	// Get current time for paid timestamp
+	paidAt := time.Now()
+
 	// Mark the transaction as paid
-	_, err = tx.Exec(context.Background(), `UPDATE transactions SET already_paid = TRUE, paid_at = CURRENT_TIMESTAMP WHERE id = $1`, txID)
+	_, err = tx.Exec(context.Background(), `UPDATE transactions SET already_paid = TRUE, paid_at = $2 WHERE id = $1`, txID, paidAt)
 	if err != nil {
 		return fmt.Errorf("failed to mark transaction %d as paid: %w", txID, err)
 	}
@@ -333,6 +340,32 @@ func MarkTransactionPaidAndUpdateDebt(txID int) error {
 		// Log error but don't necessarily fail the whole operation if transaction was marked paid
 		// This could happen if the user_debts record was already cleared or inconsistent.
 		log.Printf("Warning/Error updating user_debts for txID %d (debtor %d, creditor %d, amount %.2f): %v. This might be okay if debt was already cleared or manually adjusted.", txID, payerDbID, payeeDbID, amount, err)
+	}
+
+	// Record payment ranking
+	// Calculate duration from creation to payment
+	durationSeconds := int(paidAt.Sub(createdAt).Seconds())
+
+	// Get current payment rank for this transaction
+	var existingRankCount int
+	err = tx.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM bill_payment_ranking
+		WHERE bill_id = $1
+	`, txID).Scan(&existingRankCount)
+	if err != nil {
+		log.Printf("Error checking existing payment ranks: %v", err)
+		// Continue despite error
+	}
+
+	// Assign rank based on existing ranks
+	newRank := existingRankCount + 1
+	if newRank <= 3 { // Only track top 3 ranks
+		// Use the shared utility function to update payment ranking and streak
+		err = UpdatePaymentRankAndStreak(tx.(pgx.Tx), txID, payerDbID, newRank, paidAt, durationSeconds)
+		if err != nil {
+			log.Printf("Error updating payment rank and streak: %v", err)
+			// Continue despite error - we still want to mark the transaction as paid
+		}
 	}
 
 	// Commit the database transaction

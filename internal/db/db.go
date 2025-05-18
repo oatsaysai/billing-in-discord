@@ -183,6 +183,18 @@ func Migrate() {
 		log.Fatalf("Failed to migrate firebase_sites table: %v", err)
 	}
 
+	// Migrate badge tables
+	err = MigrateBadgeTables()
+	if err != nil {
+		log.Fatalf("Failed to migrate badge tables: %v", err)
+	}
+
+	// Migrate payment streak tables
+	err = MigratePaymentStreakTables()
+	if err != nil {
+		log.Fatalf("Failed to migrate payment streak tables: %v", err)
+	}
+
 	// Trigger function to update 'updated_at' timestamp
 	triggerFunction := `
     CREATE OR REPLACE FUNCTION update_modified_column()

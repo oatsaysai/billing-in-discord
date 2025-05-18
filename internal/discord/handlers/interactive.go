@@ -158,7 +158,7 @@ func HandleInteractiveOwedToMe(s *discordgo.Session, m *discordgo.MessageCreate,
 
 // HandleSelectTransaction displays a selection UI for transactions
 func HandleSelectTransaction(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-	// Parse command arguments: !selecttx [filter]
+	// Parse command arguments: !list [filter]
 	var filter string
 	if len(args) > 1 {
 		filter = strings.ToLower(args[1])

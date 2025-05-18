@@ -20,12 +20,15 @@ func HandleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate, args []
 **คำสั่ง Interactive UI:**
 - ` + "`!imydebts`" + ` - แสดงยอดหนี้พร้อมปุ่มชำระเงินและดูรายละเอียด
 - ` + "`!imydues`" + ` (หรือ ` + "`!iowedtome`" + `) - แสดงยอดเงินที่คนอื่นค้างชำระพร้อมปุ่มดำเนินการ
-- ` + "`!selecttx [unpaid|paid|due]`" + ` - เลือกดูรายการธุรกรรมผ่านเมนูเลือก
+- ` + "`!list [unpaid|paid|due]`" + ` - เลือกดูรายการธุรกรรมผ่านเมนูเลือก
 - ` + "`!irequest @user`" + ` - ส่งคำขอชำระเงินแบบอินเตอร์แอคทีฟ
 
 **คำสั่งจัดการ PromptPay ID:**
 - ` + "`!setpromptpay <promptpay_id>`" + ` - ตั้งค่า PromptPay ID ของคุณ
 - ` + "`!mypromptpay`" + ` - แสดง PromptPay ID ที่คุณบันทึกไว้
+
+**คำสั่ง Gamification:**
+- ` + "`!badges [@user]`" + ` - แสดงเหรียญตราและความสำเร็จที่ได้รับ
 
 **รูปแบบการสร้างบิล:**
 - บรรทัดแรก: ` + "`!bill [promptpay_id]`" + ` (ถ้าไม่ระบุจะใช้ PromptPay ID ที่บันทึกไว้)
